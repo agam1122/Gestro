@@ -4,8 +4,7 @@ import { clerkClient } from "@clerk/express";
 import axios from "axios";
 import {v2 as cloudinary} from 'cloudinary';
 import FormData from "form-data";
-import fs from 'fs/promises';
-import * as pdfParser from 'pdf-parse';
+
 
 const AI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
