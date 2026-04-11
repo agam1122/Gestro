@@ -18,7 +18,7 @@ const Hero = () => {
         </h1>
 
         <p className="mt-4 max-w-xs sm:max-w-lg 2xl:max-w-xl m-auto max-sm:text-xs text-gray-600">
-          Transform your content creation with our suite of premium AI toole.
+          Transform your content creation with our suite of premium AI tools.
           Write Articles, generate images, and enhance your workflow
         </p>
       </div>
