@@ -7,7 +7,7 @@ export default function Footer() {
                 <div className="md:max-w-96">
                     <img src={assets.logo} alt="logo" className='h-9' />
                     <p className="mt-6 text-sm">
-                        Experience the power of AI with QuickAI <br />
+                        Experience the power of AI with Gestro <br />
                         Transform your coontent creation with our suite of premium AI tools. Write articles, generate images, and enhancce your workflow.
                     </p>
                 </div>
