@@ -238,6 +238,21 @@ const VideoCall = () => {
     activeRoomIdRef.current = roomId
   }, [roomId])
 
+  useEffect(() => {
+    return () => {
+      // Cleanup sign language resources on component unmount
+      if (handsInstanceRef.current) {
+        console.log("Sign language pipeline: Closing MediaPipe Hands instance on unmount")
+        try {
+          handsInstanceRef.current.close()
+        } catch (e) {
+          console.error("Error closing hands instance on unmount:", e)
+        }
+        handsInstanceRef.current = null
+      }
+    }
+  }, [])
+
   const addIceCandidateToPeer = async (socketId, pc, candidate) => {
     if (pc.remoteDescription && pc.remoteDescription.type) {
       try {
@@ -299,6 +314,15 @@ const VideoCall = () => {
     }
     if (rawVideoRef.current) {
       rawVideoRef.current.srcObject = null
+    }
+    if (handsInstanceRef.current) {
+      console.log("Sign language pipeline: Closing MediaPipe Hands instance on cleanup")
+      try {
+        handsInstanceRef.current.close()
+      } catch (e) {
+        console.error("Error closing hands instance:", e)
+      }
+      handsInstanceRef.current = null;
     }
     latestLandmarksRef.current = null
     latestLetterRef.current = ""
