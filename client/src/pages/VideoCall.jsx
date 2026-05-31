@@ -176,6 +176,7 @@ const VideoCall = () => {
   const latestLandmarksRef = useRef(null)
   const latestLetterRef = useRef("")
   const isProcessingRef = useRef(false)
+  const lastFrameSentTimeRef = useRef(0)
   const activeRoomIdRef = useRef(roomId)
 
   useEffect(() => {
@@ -264,12 +265,32 @@ const VideoCall = () => {
       ? `ws://${wsHost}:8000/ws/detect` 
       : `wss://${wsHost}/ws/detect`
     const wsUrl = import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || defaultWsUrl
+    console.log("Sign language pipeline: Connecting to WebSocket at", wsUrl)
     mlSocketRef.current = new WebSocket(wsUrl)
+
+    mlSocketRef.current.onopen = () => {
+      console.log("Sign language pipeline: WebSocket connection established successfully to", wsUrl)
+      isProcessingRef.current = false
+    }
+
+    mlSocketRef.current.onerror = (err) => {
+      console.error("Sign language pipeline: WebSocket error occurred:", err)
+      isProcessingRef.current = false
+    }
+
+    mlSocketRef.current.onclose = (event) => {
+      console.log(`Sign language pipeline: WebSocket closed. Code: ${event.code}, Reason: ${event.reason}`)
+      isProcessingRef.current = false
+    }
 
     mlSocketRef.current.onmessage = (event) => {
       isProcessingRef.current = false
       const data = JSON.parse(event.data)
       latestLandmarksRef.current = data.landmarks || null
+      
+      if (data.error) {
+        console.warn("Sign language pipeline: Server processing error:", data.error)
+      }
       
       const newLetter = data.letter || ""
       if (latestLetterRef.current !== newLetter) {
@@ -296,17 +317,31 @@ const VideoCall = () => {
     const blob = new Blob([workerCode], { type: 'application/javascript' });
     drawLoopWorkerRef.current = new Worker(URL.createObjectURL(blob));
     
+    lastFrameSentTimeRef.current = Date.now()
+    
     drawLoopWorkerRef.current.onmessage = () => {
+      const now = Date.now()
+      // Safety reset: if we've been processing for > 1500ms, assume frame/response was lost and reset lock
+      if (isProcessingRef.current && (now - lastFrameSentTimeRef.current > 1500)) {
+        console.warn("Sign language pipeline: Frame processing timeout. Resetting processing flag.")
+        isProcessingRef.current = false
+      }
+
       if (!isProcessingRef.current) {
         if (mlSocketRef.current?.readyState === WebSocket.OPEN && rawVideoRef.current && rawVideoRef.current.readyState >= 2) {
            isProcessingRef.current = true
+           lastFrameSentTimeRef.current = now
            const tempCanvas = document.createElement("canvas")
            tempCanvas.width = 320
            tempCanvas.height = 240
            const tempCtx = tempCanvas.getContext("2d")
            tempCtx.drawImage(rawVideoRef.current, 0, 0, tempCanvas.width, tempCanvas.height)
            tempCanvas.toBlob(blob => {
-             mlSocketRef.current.send(blob)
+             if (mlSocketRef.current?.readyState === WebSocket.OPEN) {
+               mlSocketRef.current.send(blob)
+             } else {
+               isProcessingRef.current = false
+             }
            }, "image/jpeg", 0.5)
         }
       }
