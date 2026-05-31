@@ -232,6 +232,7 @@ const VideoCall = () => {
   const isProcessingRef = useRef(false)
   const lastFrameSentTimeRef = useRef(0)
   const handsInstanceRef = useRef(null)
+  const isMediaPipeProcessingRef = useRef(false)
   const activeRoomIdRef = useRef(roomId)
 
   useEffect(() => {
@@ -328,6 +329,7 @@ const VideoCall = () => {
     latestLetterRef.current = ""
     setCurrentSignTranslation("")
     isProcessingRef.current = false
+    isMediaPipeProcessingRef.current = false
   }
 
   const setupSignTranslationPipeline = (videoTrack) => {
@@ -384,9 +386,9 @@ const VideoCall = () => {
 
     // Lazy-initialize MediaPipe Hands client-side
     if (!handsInstanceRef.current && window.Hands) {
-      console.log("Sign language pipeline: Initializing MediaPipe Hands in browser...")
+      console.log("Sign language pipeline: Initializing MediaPipe Hands in browser (pinned version)...")
       const hands = new window.Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
       });
       hands.setOptions({
         maxNumHands: 2,
@@ -447,20 +449,33 @@ const VideoCall = () => {
     
     drawLoopWorkerRef.current.onmessage = async () => {
       const now = Date.now()
-      // Safety reset: if we've been processing for > 1500ms, assume frame/response was lost and reset lock
-      if (isProcessingRef.current && (now - lastFrameSentTimeRef.current > 1500)) {
-        console.warn("Sign language pipeline: Frame processing timeout. Resetting processing flag.")
-        isProcessingRef.current = false
+      
+      // Safety reset: if we've been processing for > 2000ms, assume frame was lost and reset lock
+      if (isMediaPipeProcessingRef.current && (now - lastFrameSentTimeRef.current > 2000)) {
+        console.warn("Sign language pipeline: MediaPipe processing timeout. Resetting tracking flag.")
+        isMediaPipeProcessingRef.current = false
+      }
+
+      if (isMediaPipeProcessingRef.current) {
+        // Skip frame if MediaPipe is still busy with the previous frame or loading dependencies
+        return
       }
 
       if (handsInstanceRef.current && rawVideoRef.current && rawVideoRef.current.readyState >= 2 && translationCanvasRef.current) {
         try {
+          isMediaPipeProcessingRef.current = true
+          lastFrameSentTimeRef.current = now
+          
           const canvas = translationCanvasRef.current
           const ctx = canvas.getContext("2d")
           ctx.drawImage(rawVideoRef.current, 0, 0, canvas.width, canvas.height)
+          
           await handsInstanceRef.current.send({ image: canvas });
+          
+          isMediaPipeProcessingRef.current = false
         } catch (err) {
           console.error("Sign language pipeline: Error running MediaPipe hands tracker:", err);
+          isMediaPipeProcessingRef.current = false
         }
       }
     }
