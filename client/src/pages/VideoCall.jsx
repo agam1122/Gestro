@@ -130,6 +130,39 @@ const peerConfiguration = {
   ]
 }
 
+// Global MediaPipe Hands instance to prevent multiple WebAssembly initialization crashes (EEXIST / Module.arguments)
+let globalHandsInstance = null;
+let globalHandsPromise = null;
+
+const getGlobalHandsInstance = () => {
+  if (globalHandsInstance) {
+    return Promise.resolve(globalHandsInstance);
+  }
+  if (globalHandsPromise) {
+    return globalHandsPromise;
+  }
+
+  globalHandsPromise = new Promise((resolve) => {
+    console.log("Sign language pipeline: Initializing global MediaPipe Hands instance...");
+    const hands = new window.Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7
+    });
+    
+    resolve(hands);
+  });
+
+  return globalHandsPromise.then((hands) => {
+    globalHandsInstance = hands;
+    return hands;
+  });
+};
+
 const extractFeatures = (results) => {
   // Sort hands left to right based on minimum x coordinate
   const sortedHands = [...results.multiHandLandmarks].sort((a, b) => {
@@ -231,7 +264,6 @@ const VideoCall = () => {
   const latestLetterRef = useRef("")
   const isProcessingRef = useRef(false)
   const lastFrameSentTimeRef = useRef(0)
-  const handsInstanceRef = useRef(null)
   const isMediaPipeProcessingRef = useRef(false)
   const activeRoomIdRef = useRef(roomId)
 
@@ -241,15 +273,13 @@ const VideoCall = () => {
 
   useEffect(() => {
     return () => {
-      // Cleanup sign language resources on component unmount
-      if (handsInstanceRef.current) {
-        console.log("Sign language pipeline: Closing MediaPipe Hands instance on unmount")
+      // Set empty results callback to avoid memory leaks on unmount
+      if (globalHandsInstance) {
         try {
-          handsInstanceRef.current.close()
+          globalHandsInstance.onResults(() => {});
         } catch (e) {
-          console.error("Error closing hands instance on unmount:", e)
+          console.error("Error resetting results callback on unmount:", e)
         }
-        handsInstanceRef.current = null
       }
     }
   }, [])
@@ -316,14 +346,13 @@ const VideoCall = () => {
     if (rawVideoRef.current) {
       rawVideoRef.current.srcObject = null
     }
-    if (handsInstanceRef.current) {
-      console.log("Sign language pipeline: Closing MediaPipe Hands instance on cleanup")
+    if (globalHandsInstance) {
+      console.log("Sign language pipeline: Resetting MediaPipe Hands callback on cleanup")
       try {
-        handsInstanceRef.current.close()
+        globalHandsInstance.onResults(() => {});
       } catch (e) {
-        console.error("Error closing hands instance:", e)
+        console.error("Error resetting hands callback:", e)
       }
-      handsInstanceRef.current = null;
     }
     latestLandmarksRef.current = null
     latestLetterRef.current = ""
@@ -384,52 +413,42 @@ const VideoCall = () => {
       }
     }
 
-    // Lazy-initialize MediaPipe Hands client-side
-    if (!handsInstanceRef.current && window.Hands) {
-      console.log("Sign language pipeline: Initializing MediaPipe Hands in browser (pinned version)...")
-      const hands = new window.Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
-      });
-      hands.setOptions({
-        maxNumHands: 2,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.7
-      });
-      
-      hands.onResults((results) => {
-        if (results.multiHandLandmarks) {
-          const flatLandmarks = [];
-          for (const hand of results.multiHandLandmarks) {
-            for (const lm of hand) {
-              flatLandmarks.push({ x: lm.x, y: lm.y });
+    // Lazy-initialize global singleton MediaPipe Hands client-side
+    if (window.Hands) {
+      getGlobalHandsInstance().then((hands) => {
+        hands.onResults((results) => {
+          if (results.multiHandLandmarks) {
+            const flatLandmarks = [];
+            for (const hand of results.multiHandLandmarks) {
+              for (const lm of hand) {
+                flatLandmarks.push({ x: lm.x, y: lm.y });
+              }
             }
+            latestLandmarksRef.current = flatLandmarks;
+          } else {
+            latestLandmarksRef.current = null;
           }
-          latestLandmarksRef.current = flatLandmarks;
-        } else {
-          latestLandmarksRef.current = null;
-        }
 
-        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-          const features = extractFeatures(results);
-          if (mlSocketRef.current?.readyState === WebSocket.OPEN && !isProcessingRef.current) {
-            isProcessingRef.current = true;
-            lastFrameSentTimeRef.current = Date.now();
-            mlSocketRef.current.send(JSON.stringify({ features }));
-          }
-        } else {
-          // No hands detected in the frame
-          if (latestLetterRef.current !== "") {
-            latestLetterRef.current = "";
-            setCurrentSignTranslation("");
-            // Broadcast empty translation via Socket.io
-            if (socketRef.current && activeRoomIdRef.current) {
-              socketRef.current.emit("sign-translation", { text: "", roomId: activeRoomIdRef.current })
+          if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const features = extractFeatures(results);
+            if (mlSocketRef.current?.readyState === WebSocket.OPEN && !isProcessingRef.current) {
+              isProcessingRef.current = true;
+              lastFrameSentTimeRef.current = Date.now();
+              mlSocketRef.current.send(JSON.stringify({ features }));
+            }
+          } else {
+            // No hands detected in the frame
+            if (latestLetterRef.current !== "") {
+              latestLetterRef.current = "";
+              setCurrentSignTranslation("");
+              // Broadcast empty translation via Socket.io
+              if (socketRef.current && activeRoomIdRef.current) {
+                socketRef.current.emit("sign-translation", { text: "", roomId: activeRoomIdRef.current })
+              }
             }
           }
-        }
+        });
       });
-      handsInstanceRef.current = hands;
     }
     
     const workerCode = `
@@ -461,7 +480,7 @@ const VideoCall = () => {
         return
       }
 
-      if (handsInstanceRef.current && rawVideoRef.current && rawVideoRef.current.readyState >= 2 && translationCanvasRef.current) {
+      if (globalHandsInstance && rawVideoRef.current && rawVideoRef.current.readyState >= 2 && translationCanvasRef.current) {
         try {
           isMediaPipeProcessingRef.current = true
           lastFrameSentTimeRef.current = now
@@ -470,7 +489,7 @@ const VideoCall = () => {
           const ctx = canvas.getContext("2d")
           ctx.drawImage(rawVideoRef.current, 0, 0, canvas.width, canvas.height)
           
-          await handsInstanceRef.current.send({ image: canvas });
+          await globalHandsInstance.send({ image: canvas });
           
           isMediaPipeProcessingRef.current = false
         } catch (err) {
