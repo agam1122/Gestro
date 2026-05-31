@@ -473,7 +473,7 @@ const VideoCall = () => {
         })
       }
       
-      const newStream = new MediaStream(localStreamRef.current.getTracks())
+      const newStream = localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null
       localStreamRef.current = newStream
       setLocalStream(newStream)
       
@@ -553,7 +553,7 @@ const VideoCall = () => {
         })
       }
 
-      const newStream = new MediaStream(localStreamRef.current.getTracks())
+      const newStream = localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null
       localStreamRef.current = newStream
       setLocalStream(newStream)
 

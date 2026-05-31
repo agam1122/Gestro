@@ -2,6 +2,7 @@ import pickle
 import cv2
 import mediapipe as mp
 import numpy as np
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import warnings
@@ -74,8 +75,8 @@ async def detect_sign_language(websocket: WebSocket):
     await websocket.accept()
     print("Client connected to WebSocket", flush=True)
     
-    # Load model and MediaPipe on the first WS connection
-    initialize_resources()
+    # Load model and MediaPipe on the first WS connection asynchronously to avoid blocking the event loop
+    asyncio.create_task(asyncio.to_thread(initialize_resources))
     
     try:
         while True:
