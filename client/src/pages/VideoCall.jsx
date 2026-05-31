@@ -130,6 +130,60 @@ const peerConfiguration = {
   ]
 }
 
+const extractFeatures = (results) => {
+  // Sort hands left to right based on minimum x coordinate
+  const sortedHands = [...results.multiHandLandmarks].sort((a, b) => {
+    const minA = Math.min(...a.map(lm => lm.x));
+    const minB = Math.min(...b.map(lm => lm.x));
+    return minA - minB;
+  }).slice(0, 2);
+
+  const rawX = [];
+  const rawY = [];
+
+  for (const hand of sortedHands) {
+    for (const lm of hand) {
+      rawX.push(lm.x);
+      rawY.push(lm.y);
+    }
+  }
+
+  // Pad if only one hand is detected
+  if (sortedHands.length === 1) {
+    for (let i = 0; i < 21; i++) {
+      rawX.push(0.0);
+      rawY.push(0.0);
+    }
+  }
+
+  // Normalize Hand 1 relative to its wrist (index 0)
+  const base1X = rawX[0];
+  const base1Y = rawY[0];
+  for (let i = 0; i < 21; i++) {
+    rawX[i] -= base1X;
+    rawY[i] -= base1Y;
+  }
+
+  // Normalize Hand 2 relative to its wrist (index 21)
+  if (sortedHands.length > 1) {
+    const base2X = rawX[21];
+    const base2Y = rawY[21];
+    for (let i = 21; i < 42; i++) {
+      rawX[i] -= base2X;
+      rawY[i] -= base2Y;
+    }
+  }
+
+  // Interleave normalized x and y coordinates
+  const processedFeatures = [];
+  for (let i = 0; i < 42; i++) {
+    processedFeatures.push(rawX[i]);
+    processedFeatures.push(rawY[i]);
+  }
+
+  return processedFeatures;
+};
+
 const VideoCall = () => {
   const { user } = useUser()
   const isTeacher = user?.publicMetadata?.role === 'teacher';
@@ -177,6 +231,7 @@ const VideoCall = () => {
   const latestLetterRef = useRef("")
   const isProcessingRef = useRef(false)
   const lastFrameSentTimeRef = useRef(0)
+  const handsInstanceRef = useRef(null)
   const activeRoomIdRef = useRef(roomId)
 
   useEffect(() => {
@@ -286,7 +341,6 @@ const VideoCall = () => {
     mlSocketRef.current.onmessage = (event) => {
       isProcessingRef.current = false
       const data = JSON.parse(event.data)
-      latestLandmarksRef.current = data.landmarks || null
       
       if (data.error) {
         console.warn("Sign language pipeline: Server processing error:", data.error)
@@ -303,12 +357,60 @@ const VideoCall = () => {
         }
       }
     }
+
+    // Lazy-initialize MediaPipe Hands client-side
+    if (!handsInstanceRef.current && window.Hands) {
+      console.log("Sign language pipeline: Initializing MediaPipe Hands in browser...")
+      const hands = new window.Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+      });
+      
+      hands.onResults((results) => {
+        if (results.multiHandLandmarks) {
+          const flatLandmarks = [];
+          for (const hand of results.multiHandLandmarks) {
+            for (const lm of hand) {
+              flatLandmarks.push({ x: lm.x, y: lm.y });
+            }
+          }
+          latestLandmarksRef.current = flatLandmarks;
+        } else {
+          latestLandmarksRef.current = null;
+        }
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          const features = extractFeatures(results);
+          if (mlSocketRef.current?.readyState === WebSocket.OPEN && !isProcessingRef.current) {
+            isProcessingRef.current = true;
+            lastFrameSentTimeRef.current = Date.now();
+            mlSocketRef.current.send(JSON.stringify({ features }));
+          }
+        } else {
+          // No hands detected in the frame
+          if (latestLetterRef.current !== "") {
+            latestLetterRef.current = "";
+            setCurrentSignTranslation("");
+            // Broadcast empty translation via Socket.io
+            if (socketRef.current && activeRoomIdRef.current) {
+              socketRef.current.emit("sign-translation", { text: "", roomId: activeRoomIdRef.current })
+            }
+          }
+        }
+      });
+      handsInstanceRef.current = hands;
+    }
     
     const workerCode = `
       let intervalId = null;
       self.onmessage = function(e) {
         if (e.data === 'start') {
-          intervalId = setInterval(() => self.postMessage('tick'), 33);
+          intervalId = setInterval(() => self.postMessage('tick'), 45);
         } else if (e.data === 'stop') {
           clearInterval(intervalId);
         }
@@ -319,7 +421,7 @@ const VideoCall = () => {
     
     lastFrameSentTimeRef.current = Date.now()
     
-    drawLoopWorkerRef.current.onmessage = () => {
+    drawLoopWorkerRef.current.onmessage = async () => {
       const now = Date.now()
       // Safety reset: if we've been processing for > 1500ms, assume frame/response was lost and reset lock
       if (isProcessingRef.current && (now - lastFrameSentTimeRef.current > 1500)) {
@@ -327,22 +429,11 @@ const VideoCall = () => {
         isProcessingRef.current = false
       }
 
-      if (!isProcessingRef.current) {
-        if (mlSocketRef.current?.readyState === WebSocket.OPEN && rawVideoRef.current && rawVideoRef.current.readyState >= 2) {
-           isProcessingRef.current = true
-           lastFrameSentTimeRef.current = now
-           const tempCanvas = document.createElement("canvas")
-           tempCanvas.width = 320
-           tempCanvas.height = 240
-           const tempCtx = tempCanvas.getContext("2d")
-           tempCtx.drawImage(rawVideoRef.current, 0, 0, tempCanvas.width, tempCanvas.height)
-           tempCanvas.toBlob(blob => {
-             if (mlSocketRef.current?.readyState === WebSocket.OPEN) {
-               mlSocketRef.current.send(blob)
-             } else {
-               isProcessingRef.current = false
-             }
-           }, "image/jpeg", 0.5)
+      if (handsInstanceRef.current && rawVideoRef.current && rawVideoRef.current.readyState >= 2) {
+        try {
+          await handsInstanceRef.current.send({ image: rawVideoRef.current });
+        } catch (err) {
+          console.error("Sign language pipeline: Error running MediaPipe hands tracker:", err);
         }
       }
     }
