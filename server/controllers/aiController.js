@@ -4,6 +4,9 @@ import { clerkClient } from "@clerk/express";
 import axios from "axios";
 import {v2 as cloudinary} from 'cloudinary';
 import FormData from "form-data";
+import fs from "fs";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+
 
 
 const AI = new GoogleGenAI({
@@ -15,21 +18,28 @@ const FREE_USAGE_LIMIT = 1000;
 
 
 
-//Article generation function
-export const generateArticle = async (req, res) => {
+//Question Paper generation function (formerly Article)
+export const generateQuestionPaper = async (req, res) => {
   try {
     
     const { userId } = req.auth; 
-    const { prompt, length } = req.body;
+    const { universityName, branch, semester, subject, syllabus, totalMarks, mcqCount, shortCount, longCount } = req.body;
+    
+    // Check if user is a teacher
+    const user = await clerkClient.users.getUser(userId);
+    if (user.publicMetadata?.role !== 'teacher') {
+      return res.status(403).json({
+        success: false,
+        message: "Only teachers can generate question papers.",
+      });
+    }
     
     // 🟢 RE-ENABLING: Get the plan and usage from auth.js
     const plan = req.plan; 
     const free_usage = req.free_usage; 
     
-    // Convert requested length to a number
-    const requestedLengthNum = parseInt(length, 10);
-    // Set maxOutputTokens to requested length + buffer
-    const safeMaxTokens = requestedLengthNum + MAX_OUTPUT_TOKENS_BUFFER; 
+    // Fixed max tokens for question papers
+    const safeMaxTokens = 4000; 
 
     // 🟢 RE-ENABLING: Final Limit Check
     if (plan !== "premium" && free_usage >= FREE_USAGE_LIMIT) {
@@ -39,12 +49,42 @@ export const generateArticle = async (req, res) => {
       });
     }
 
-    
-    // CORE LOGIC: We rely on the prompt to hit the target length.
+    // Build the structural instructions dynamically
+    let instructionString = `You MUST generate EXACTLY the following quantities of questions, organized into sections. Do not skip any:\n`;
+    if (mcqCount > 0) instructionString += `- Section A: Exactly ${mcqCount} Multiple Choice Questions (MCQs).\n`;
+    if (shortCount > 0) instructionString += `- Section B: Exactly ${shortCount} Short Answer Questions.\n`;
+    if (longCount > 0) instructionString += `- Section C: Exactly ${longCount} Theoretical Long Answer Questions.\n`;
+
+    let answerKeyInstruction = "";
+    if (mcqCount > 0) {
+      answerKeyInstruction = `6. ANSWER KEY SEPARATION: You MUST append the exact string "====ANSWER_KEY====" at the very end of your response, and then write the answer key for the MCQs underneath it. Do not include answers for short/long questions.`;
+    } else {
+      answerKeyInstruction = `6. DO NOT put an Answer Key in the main question paper section.`;
+    }
+
+    // CORE LOGIC: Generate a question paper.
     const response = await AI.models.generateContent({
       model: "gemini-2.5-flash", 
-      // Inject a strong instruction to enforce the length
-      contents: [{ role: "user", parts: [{ text: `Generate a detailed article based on this prompt: ${prompt}. The article MUST be approximately ${requestedLengthNum} tokens long.` }] }],
+      contents: [{ role: "user", parts: [{ text: `Generate a professional engineering college question paper for ${universityName ? universityName + ', ' : ''}Branch: ${branch}, ${semester}, Subject: ${subject}. 
+      
+Syllabus to cover:
+${syllabus}
+
+${instructionString}
+
+CRITICAL MARKDOWN FORMATTING INSTRUCTIONS:
+1. Heading: Start immediately with the University/College Name as a pure Markdown H1 (e.g., # ${universityName || 'Question Paper'}). DO NOT use HTML tags like <p> or <h1 align="center">.
+2. Metadata: On the next line, put: **Subject:** ${subject} | **Branch:** ${branch} | **Semester:** ${semester}. Add a blank line.
+3. Time & Marks: **Total Marks:** ${totalMarks} | **Time Allowed:** 3 Hours. (Distribute the marks logically among the questions so they sum exactly to ${totalMarks}). Add a blank line.
+4. MCQ Options: You MUST format multiple-choice options as a Markdown unordered list (using dashes). This is extremely important so they render on separate lines.
+   Example:
+   1. Question text here?
+   - A) Option 1
+   - B) Option 2
+   - C) Option 3
+   - D) Option 4
+5. Math & Physics Constants: DO NOT USE LaTeX formatting (no $ or $$ symbols). Use standard plain text and unicode characters.
+${answerKeyInstruction}` }] }],
       config: {
         temperature: 0.7,
         maxOutputTokens: safeMaxTokens, 
@@ -65,14 +105,14 @@ export const generateArticle = async (req, res) => {
       if (!content) {
           const finishReason = candidate?.finishReason || 'NO_CONTENT_GENERATED';
           console.error("GENERATION BLOCKED/EMPTY:", finishReason);
-          throw new Error(`Model generated empty content. Finish Reason: ${finishReason}. Please try a slightly larger length in the body (e.g., 850 instead of 800).`);
+          throw new Error(`Model generated empty content. Finish Reason: ${finishReason}.`);
       }
     }
     
     // If execution reaches here, 'content' is guaranteed to be a non-null string
     await sql` 
       INSERT INTO creations(user_id, prompt, content, type) 
-      VALUES (${userId}, ${prompt}, ${content}, 'article') 
+      VALUES (${userId}, ${`${subject} Question Paper`}, ${content}, 'question-paper') 
     `;
 
     // 🟢 RE-ENABLING: Only update usage if the plan is NOT premium
@@ -98,7 +138,7 @@ export const generateArticle = async (req, res) => {
   } catch (error) {
     // This catches definitive network errors or the Error thrown above.
     console.error("Controller Error:", error.message);
-    res.status(500).json({success: false, message: `Error generating article: ${error.message}`}); 
+    res.status(500).json({success: false, message: `Error generating question paper: ${error.message}`}); 
   }
 };
 
@@ -106,350 +146,157 @@ export const generateArticle = async (req, res) => {
 
 
 
-//Blog Title generation function
-export const generateBlogTitle = async (req, res) => {
-  try {
-    
-    const { userId } = req.auth; 
-    const { prompt } = req.body;
-    
-    // 🟢 RE-ENABLING: Get the plan and usage from auth.js
-    const plan = req.plan; 
-    const free_usage = req.free_usage; 
-    
 
-    // 🟢 RE-ENABLING: Final Limit Check
-    if (plan !== "premium" && free_usage >= FREE_USAGE_LIMIT) {
-      return res.status(403).json({ 
+
+
+
+
+
+export const resumeReview = async (req, res) => {
+  try {
+
+    const { userId } = req.auth;
+    const resume = req.file;
+
+    // Plan check
+    const plan = req.plan;
+
+    if (plan !== "premium") {
+      return res.status(403).json({
         success: false,
         message: "Limit reached. Upgrade to continue.",
       });
     }
 
-    
-    // CORE LOGIC: We rely on the prompt to hit the target length.
+    // File existence check
+    if (!resume || !resume.path) {
+      return res.status(400).json({
+        success: false,
+        message: "Resume upload failed.",
+      });
+    }
+
+    // File size check (5MB)
+    if (resume.size > 5 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        message: "File size exceeds 5MB limit.",
+      });
+    }
+
+    // Read PDF file
+    const dataBuffer = new Uint8Array(
+      fs.readFileSync(resume.path)
+    );
+
+    // Load PDF
+    const pdf = await pdfjsLib.getDocument({
+      data: dataBuffer,
+    }).promise;
+
+    let resumeText = "";
+
+    // Extract text from all pages
+    for (let i = 1; i <= pdf.numPages; i++) {
+
+      const page = await pdf.getPage(i);
+
+      const textContent = await page.getTextContent();
+
+      const pageText = textContent.items
+        .map(item => item.str)
+        .join(" ");
+
+      resumeText += pageText + "\n";
+    }
+
+    // Empty text check
+    if (!resumeText || resumeText.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Could not extract text from resume.",
+      });
+    }
+
+    // AI Prompt
+    const prompt = `
+You are an expert ATS resume reviewer.
+
+Analyze the following resume and provide:
+
+1. Overall feedback
+2. Resume strengths
+3. Weaknesses
+4. ATS optimization tips
+5. Missing skills or improvements
+6. Formatting suggestions
+7. Professionalism score out of 10
+
+Resume Content:
+
+${resumeText}
+`;
+
+    // Generate AI review
     const response = await AI.models.generateContent({
-      model: "gemini-2.5-flash", 
-      // Inject a strong instruction to enforce the length
-      contents: [{ role: "user", parts: [{ text: `Generate 5 compelling and concise blog title options for an article about: ${prompt}` }] }],
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
       config: {
         temperature: 0.7,
+        maxOutputTokens: 1200,
       },
     });
 
-    let content = response.text; 
-    
-    // Fallback: Check for content in parts array if response.text is empty
+    let content = response.text;
+
+    // Fallback extraction
     if (!content) {
+
       const candidate = response.candidates?.[0];
+
       const parts = candidate?.content?.parts;
+
       if (parts && parts.length > 0 && parts[0].text) {
-          content = parts[0].text; 
+        content = parts[0].text;
       }
-      
-      // If content is STILL empty, throw a definitive error.
+
       if (!content) {
-          const finishReason = candidate?.finishReason || 'NO_CONTENT_GENERATED';
-          console.error("GENERATION BLOCKED/EMPTY:", finishReason);
-          throw new Error(`Model generated empty content. Finish Reason: ${finishReason}. Please try a slightly larger length in the body (e.g., 850 instead of 800).`);
+        throw new Error("AI failed to generate review.");
       }
     }
-    
-    // If execution reaches here, 'content' is guaranteed to be a non-null string
-    await sql` 
-      INSERT INTO creations(user_id, prompt, content, type) 
-      VALUES (${userId}, ${prompt}, ${content}, 'blog-title') 
+
+    // Save to DB
+    await sql`
+      INSERT INTO creations(user_id, prompt, content, type)
+      VALUES (
+        ${userId},
+        ${"Review the uploaded resume"},
+        ${content},
+        ${"resume-review"}
+      )
     `;
 
-    // 🟢 RE-ENABLING: Only update usage if the plan is NOT premium
-    if(plan !== 'premium'){
-        await clerkClient.users.updateUserMetadata(userId, {
-            privateMetadata:{
-                // Increment free_usage only if it's the free plan
-                free_usage: free_usage + 1
-            }
-        })
-    }
-    
-    // Return the actual generated content
-    res.json({
-      success: true, 
-      content: content,
-      // Provide an optional warning if the generation stopped early for reasons other than STOP or MAX_TOKENS
-      warning: response.candidates?.[0]?.finishReason && response.candidates[0].finishReason !== "STOP" && response.candidates[0].finishReason !== "MAX_TOKENS" 
-               ? `Note: Generation finished with reason: ${response.candidates?.[0]?.finishReason}.`
-               : undefined
-    })
+    // Delete uploaded file
+    fs.unlinkSync(resume.path);
 
-  } catch (error) {
-    // This catches definitive network errors or the Error thrown above.
-    console.error("Controller Error:", error.message);
-    res.status(500).json({success: false, message: `Error generating article: ${error.message}`}); 
-  }
-};
-
-
-
-
-
-//Image generation function
-export const generateImage = async (req, res) => {
-  try {
-    
-    const { userId } = req.auth; 
-    const { prompt, publish } = req.body;
-    
-    // 🟢 RE-ENABLING: Get the plan and usage from auth.js
-    const plan = req.plan; 
-    
-    
-    // 🟢 RE-ENABLING: Final Limit Check
-    if (plan !== "premium" ) {
-      return res.status(403).json({ 
-        success: false,
-        message: "Limit reached. Upgrade to continue.",
-      });
-    }
-
-    
-    // CORE LOGIC: We rely on the prompt to hit the target length.
-    const formData = new FormData()
-    formData.append('prompt', prompt)
-    const {data} = await axios.post('https://clipdrop-api.co/text-to-image/v1', formData, {
-      headers: { 'x-api-key': process.env.CLIPDROP_API_KEY, },
-      responseType: 'arraybuffer' 
-    })
-    
-
-    const base64Image = `data:image/png;base64,${Buffer.from(data, 'binary').toString('base64')}`;
-
-    let secure_url = '';
-    // If publish is true, upload to Cloudinary
-    if (publish) {
-      const uploadResult = await cloudinary.uploader.upload(base64Image);
-      secure_url = uploadResult.secure_url; 
-    } else {
-        // If not publishing, save the Base64 image data as the content string
-        secure_url = base64Image;
-    }
-
-    const contentToSave = secure_url;
-
-    // If execution reaches here, 'content' is guaranteed to be a non-null string
-    await sql` 
-      INSERT INTO creations(user_id, prompt, content, type, publish) 
-      VALUES (${userId}, ${prompt}, ${secure_url}, 'image', ${publish ?? false}) 
-    `;
-
-    
-    
-    // Return the actual generated content
-    res.json({
-      success: true, 
-      content: contentToSave,
-    })
-
-  } catch (error) {
-    // This catches definitive network errors or the Error thrown above.
-    console.error("Controller Error:", error.message);
-    res.status(500).json({success: false, message: `Error generating image: ${error.message}`}); 
-  }
-};
-
-
-
-
-
-
-//Image background removal function
-export const removeImageBackground = async (req, res) => {
-  try {
-    
-    const { userId } = req.auth; 
-    const image = req.file;
-    
-    // 🟢 RE-ENABLING: Get the plan and usage from auth.js
-    const plan = req.plan; 
-    
-    
-    // 🟢 RE-ENABLING: Final Limit Check
-    if (plan !== "premium" ) {
-      return res.status(403).json({ 
-        success: false,
-        message: "Limit reached. Upgrade to continue.",
-      });
-    }
-
-    const {secure_url} = await cloudinary.uploader.upload(image.path, {
-      transformation: [
-        { 
-          effect: "background_removal" , 
-          background_removal: "remove_the_background",
-        }
-      ],
-    }); 
-    
-
-    // If execution reaches here, 'content' is guaranteed to be a non-null string
-    await sql` 
-      INSERT INTO creations(user_id, prompt, content, type) 
-      VALUES (${userId}, 'Remove background from image', ${secure_url}, 'image')
-    `;
-
-    
-    
-    // Return the actual generated content
-    res.json({
-      success: true, 
-      content: secure_url,
-    })
-
-  } catch (error) {
-    // This catches definitive network errors or the Error thrown above.
-    console.error("Controller Error:", error.message);
-    res.status(500).json({success: false, message: `Error generating image: ${error.message}`}); 
-  }
-};
-
-
-
-
-
-
-
-
-
-
-//Object removal function
-export const removeImageObject = async (req, res) => {
-  try {
-    
-    const { userId } = req.auth; 
-    const { object } = req.body; 
-    const image = req.file;
-    
-    // 🟢 RE-ENABLING: Get the plan and usage from auth.js
-    const plan = req.plan; 
-    
-    
-    // 🟢 RE-ENABLING: Final Limit Check
-    if (plan !== "premium" ) {
-      return res.status(403).json({ 
-        success: false,
-        message: "Limit reached. Upgrade to continue.",
-      });
-    }
-
-    const {public_id} = await cloudinary.uploader.upload(image.path); 
-
-    const image_url = cloudinary.url(public_id, {
-      transformation: [
-        {
-          effect: `gen_remove:${object}`,
-        },
-      ],
-      resource_type: "image",
+    // Response
+    return res.json({
+      success: true,
+      content,
     });
-    
-
-    // If execution reaches here, 'content' is guaranteed to be a non-null string
-    await sql` 
-      INSERT INTO creations(user_id, prompt, content, type) 
-      VALUES (${userId}, ${`Removed ${object} from image`}, ${image_url}, 'image')
-    `;
-
-    
-    
-    // Return the actual generated content
-    res.json({
-      success: true, 
-      content: image_url,
-    })
 
   } catch (error) {
-    // This catches definitive network errors or the Error thrown above.
-    console.error("Controller Error:", error.message);
-    res.status(500).json({success: false, message: `Error generating image: ${error.message}`}); 
+
+    console.error("Resume Review Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: `Error reviewing resume: ${error.message}`,
+    });
   }
 };
-
-
-
-
-
-//Resume reviewing function 
-export const resumeReview = async (req, res) => {}
-
-// export const resumeReview = async (req, res) => {
-//   try {
-    
-//     const { userId } = req.auth; 
-//     const resume = req.file;
-    
-//     // 🟢 Get the plan and usage from auth.js
-//     const plan = req.plan; 
-    
-    
-//     // 🟢 Final Limit Check
-//     if (plan !== "premium" ) {
-//       return res.status(403).json({ 
-//         success: false,
-//         message: "Limit reached. Upgrade to continue.",
-//       });
-//     }
-
-//     // 🛑 Check for file upload failure before reading path
-//     if (!resume || !resume.path) {
-//         return res.status(400).json({
-//             success: false,
-//             message: "Resume file upload failed. Please ensure file is valid and under 5MB."
-//         });
-//     }
-
-//     if(resume.size > 5 * 1024 * 1024){
-//       res.json({success: false, message: "File size exceeds 5MB limit."});
-//     }
-    
-//     const dataBuffer = fs.readFile(resume.path);
-    
-
-//     const pdfData = await pdfParser.default(dataBuffer);
-//     const text = pdfData.text;
-
-//     const prompt = `Review the following resume and provide constructive feedback on its strengths, weaknesses and areas for improvement. Resume content:\n\n${text}`; 
-
-//     // CORE LOGIC: We rely on the prompt to hit the target length.
-//     const response = await AI.models.generateContent({
-//       model: "gemini-2.5-flash",
-//       // Inject a strong instruction to enforce the length
-//       contents: [{ role: "user", parts: [{ text: `${prompt}` }] }],
-//       config: {
-//         temperature: 0.7,
-//         maxOutputTokens: 1000, // Increased for a proper review
-//       },
-//     });
-
-//     let content = response.text; 
-
-//     // If execution reaches here, 'content' is guaranteed to be a non-null string
-//     await sql` 
-//       INSERT INTO creations(user_id, prompt, content, type) 
-//       VALUES (${userId}, "Review the uploaded resume", ${content}, 'resume-review')
-//     `;
-
-    
-    
-//     // Return the actual generated content
-//     res.json({
-//       success: true, 
-//       content: content,
-//     })
-
-//   } catch (error) {
-//     // This catches definitive network errors or the Error thrown above.
-//     console.error("Controller Error:", error.message);
-//     res.status(500).json({success: false, message: `Error generating image: ${error.message}`}); 
-//   }
-// };
-
-

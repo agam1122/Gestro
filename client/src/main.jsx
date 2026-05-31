@@ -3,6 +3,9 @@ import './index.css'
 import App from './App.jsx'
 import { BrowserRouter } from 'react-router-dom'
 import { ClerkProvider } from '@clerk/clerk-react'
+import axios from 'axios'
+
+axios.defaults.baseURL = import.meta.env.VITE_BASE_URL || 'http://localhost:4000'
 
 
 // Import your Publishable Key

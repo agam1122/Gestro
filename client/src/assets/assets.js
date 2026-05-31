@@ -5,7 +5,7 @@ import star_icon from "./star_icon.svg";
 import star_dull_icon from "./star_dull_icon.svg";
 import profile_img_1 from "./profile_img_1.png";
 import arrow_icon from "./arrow_icon.svg";
-import { SquarePen, Hash, Image, Eraser, Scissors, FileText } from 'lucide-react'
+import { SquarePen, Hash, Image, Eraser, Scissors, FileText, Video, Hand, School, Megaphone, BookMarked, House, Timer } from 'lucide-react'
 import ai_gen_img_1 from "./ai_gen_img_1.png";
 import ai_gen_img_2 from "./ai_gen_img_2.png";
 import ai_gen_img_3 from "./ai_gen_img_3.png";
@@ -22,39 +22,32 @@ export const assets = {
 
 export const AiToolsData = [
     {
-        title: 'AI Article Writer',
-        description: 'Generate high-quality, engaging articles on any topic with our AI writing technology.',
-        Icon: SquarePen,
+        title: 'Virtual Classrooms',
+        description: 'Interactive spaces with AI Tutors to guide your learning and collaborate with peers.',
+        Icon: School,
         bg: { from: '#3588F2', to: '#0BB0D7' },
-        path: '/ai/write-article'
+        path: '/ai/classrooms'
     },
     {
-        title: 'Blog Title Generator',
-        description: 'Find the perfect, catchy title for your blog posts with our AI-powered generator.',
-        Icon: Hash,
+        title: 'Notice Board',
+        description: 'Stay updated with official announcements, exam results, and administrative gazettes.',
+        Icon: Megaphone,
         bg: { from: '#B153EA', to: '#E549A3' },
-        path: '/ai/blog-titles'
+        path: '/ai/community'
     },
     {
-        title: 'AI Image Generation',
-        description: 'Create stunning visuals with our AI image generation tool, Experience the power of AI ',
-        Icon: Image,
+        title: 'Digital Library',
+        description: 'Access an extensive collection of digital books and curated educational resources.',
+        Icon: BookMarked,
         bg: { from: '#20C363', to: '#11B97E' },
-        path: '/ai/generate-images'
+        path: '/ai/library'
     },
     {
-        title: 'Background Removal',
-        description: 'Effortlessly remove backgrounds from your images with our AI-driven tool.',
-        Icon: Eraser,
-        bg: { from: '#F76C1C', to: '#F04A3C' },
-        path: '/ai/remove-background'
-    },
-    {
-        title: 'Object Removal',
-        description: 'Remove unwanted objects from your images seamlessly with our AI object removal tool.',
-        Icon: Scissors,
-        bg: { from: '#5C6AF1', to: '#427DF5' },
-        path: '/ai/remove-object'
+        title: '1-to-1 Video Call',
+        description: 'Establish high-fidelity, secure peer-to-peer video calls with integrated chat and screen sharing.',
+        Icon: Video,
+        bg: { from: '#8B5CF6', to: '#6366F1' },
+        path: '/ai/video-call'
     },
     {
         title: 'Resume Reviewer',
@@ -62,29 +55,44 @@ export const AiToolsData = [
         Icon: FileText,
         bg: { from: '#12B7AC', to: '#08B6CE' },
         path: '/ai/review-resume'
+    },
+
+    {
+        title: 'Question Paper Generator',
+        description: 'Generate high-quality question papers automatically using our AI engine (Teachers only).',
+        Icon: SquarePen,
+        bg: { from: '#F76C1C', to: '#F04A3C' },
+        path: '/ai/generate-question-paper'
+    },
+    {
+        title: 'Study Lounge',
+        description: 'Immerse yourself in a cozy 3D room with procedural audio cues, integrated pomodoro timer, and synced journal notes.',
+        Icon: Timer,
+        bg: { from: '#EC4899', to: '#F43F5E' },
+        path: '/ai/study-lounge'
     }
 ]
 
 export const dummyTestimonialData = [
     {
         image: assets.profile_img_1,
-        name: 'John Doe',
-        title: 'Marketing Director, TechCorp',
-        content: 'ContentAI has revolutionized our content workflow. The quality of the articles is outstanding, and it saves us hours of work every week.',
-        rating: 4,
-    },
-    {
-        image: assets.profile_img_1,
-        name: 'Jane Smith',
-        title: 'Content Creator, TechCorp',
-        content: 'ContentAI has made our content creation process effortless. The AI tools have helped us produce high-quality content faster than ever before.',
+        name: 'Aarav Sharma',
+        title: 'Computer Science Student',
+        content: 'The AI Tutor in the virtual classrooms completely changed how I study. It answers my coding questions instantly based on the course materials!',
         rating: 5,
     },
     {
         image: assets.profile_img_1,
-        name: 'David Lee',
-        title: 'Content Writer, TechCorp',
-        content: 'ContentAI has transformed our content creation process. The AI tools have helped us produce high-quality content faster than ever before.',
+        name: 'Dr. Priya Desai',
+        title: 'Professor of Physics',
+        content: 'Managing notices and generating question papers has never been easier. This platform saves me hours of administrative work every week.',
+        rating: 5,
+    },
+    {
+        image: assets.profile_img_1,
+        name: 'Rohan Patel',
+        title: 'Engineering Student',
+        content: 'The 1-to-1 video calls are incredibly smooth, and having access to the entire digital library from one dashboard is a game changer.',
         rating: 4,
     },
 ]

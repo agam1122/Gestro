@@ -1,13 +1,18 @@
 import Home from './pages/Home'
+import Onboarding from './pages/Onboarding'
 import Layout from './pages/Layout'
 import Dashboard from './pages/Dashboard'
-import WriteArticle from './pages/WriteArticle'
-import BlogTitles from './pages/BlogTitles'
-import GenerateImages from './pages/GenerateImages'
-import RemoveBackground from './pages/RemoveBackground'
-import RemoveObject from './pages/RemoveObject'
+import GenerateQuestionPaper from './pages/GenerateQuestionPaper'
 import ReviewResume from './pages/ReviewResume'
-import Community from './pages/Community'
+import NoticeBoard from './pages/NoticeBoard'
+import VideoCall from './pages/VideoCall'
+import Library from './pages/Library'
+import MyBookshelf from './pages/MyBookshelf'
+import LibraryAdmin from './pages/LibraryAdmin'
+import Classrooms from './pages/Classrooms'
+import ClassroomDetail from './pages/ClassroomDetail'
+import DynamicPage from './pages/DynamicPage'
+import StudyLounge from './pages/StudyLounge'
 import { Routes, Route } from 'react-router-dom'
 import { useAuth } from '@clerk/clerk-react'
 import { useEffect } from 'react'
@@ -17,6 +22,7 @@ import { Toaster } from 'react-hot-toast'
 const App = () => {
 
   const {getToken} = useAuth()
+
   useEffect(() => {
     getToken().then((token) => console.log(token));
   }, [])
@@ -26,15 +32,20 @@ const App = () => {
       <Toaster />
       <Routes>
         <Route path='/' element={ <Home />} />
+        <Route path='/onboarding' element={ <Onboarding />} />
+        <Route path='/page/:slug' element={ <DynamicPage />} />
         <Route path='/ai' element={ <Layout />}>
             <Route index element={ <Dashboard />} />
-            <Route path='write-article' element={ <WriteArticle />} />
-            <Route path='blog-titles' element={ <BlogTitles />} />
-            <Route path='generate-images' element={ <GenerateImages />} />
-            <Route path='remove-background' element={ <RemoveBackground />} />
-            <Route path='remove-object' element={ <RemoveObject />} />
+            <Route path='generate-question-paper' element={ <GenerateQuestionPaper />} />
             <Route path='review-resume' element={ <ReviewResume />} />
-            <Route path='community' element={ <Community />} />
+            <Route path='video-call' element={ <VideoCall />} />
+            <Route path='library' element={ <Library />} />
+            <Route path='library/my-books' element={ <MyBookshelf />} />
+            <Route path='library/admin' element={ <LibraryAdmin />} />
+            <Route path='community' element={ <NoticeBoard />} />
+            <Route path='classrooms' element={ <Classrooms />} />
+            <Route path='classrooms/:id' element={ <ClassroomDetail />} />
+            <Route path='study-lounge' element={ <StudyLounge />} />
         </Route>
       </Routes>
     </div>

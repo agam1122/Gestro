@@ -1,5 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap');
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 *{
   font-family: "Outfit", sans-serif;
@@ -16,4 +17,16 @@
 
 .cl-drawerRoot{
   z-index: 10;
+}
+
+/* Prevent page breaks inside PDF elements to avoid text slicing */
+#pdf-content p, #pdf-content li, #pdf-content h1, #pdf-content h2, #pdf-content h3, #pdf-content pre,
+#answer-key-content p, #answer-key-content li, #answer-key-content h1, #answer-key-content h2, #answer-key-content h3 {
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+/* Center the main college/university heading automatically */
+#pdf-content h1:first-of-type {
+  text-align: center;
 }

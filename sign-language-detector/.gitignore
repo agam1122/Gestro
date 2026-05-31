@@ -1,0 +1,24 @@
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE settings
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Training data and raw datasets
+data/
+data.pickle
+unwanted/
+
