@@ -18,6 +18,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Gestro Sign Language Detector API is running!"}
+
 # Load trained model
 try:
     model_dict = pickle.load(open('./model.p', 'rb'))
