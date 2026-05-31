@@ -22,29 +22,52 @@ app.add_middleware(
 async def root():
     return {"status": "ok", "message": "Gestro Sign Language Detector API is running!"}
 
-# Load trained model
-try:
-    model_dict = pickle.load(open('./model.p', 'rb'))
-    model = model_dict['model']
-    label_encoder = model_dict.get('label_encoder', None)
-except Exception as e:
-    print("Error loading model:", e)
-    model = None
-    label_encoder = None
+# Load trained model and MediaPipe lazily to ensure instant boot time (prevents Render healthcheck SIGKILL)
+model = None
+label_encoder = None
+hands = None
 
-# MediaPipe Setup
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=2,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
+def initialize_resources():
+    global model, label_encoder, hands
+    if hands is not None:
+        return
+    
+    print("Lazy-loading ML model and MediaPipe hands tracker...")
+    
+    # 1. Load trained model
+    try:
+        import xgboost  # Ensure xgboost is available for StackingClassifier unpickling
+        model_dict = pickle.load(open('./model.p', 'rb'))
+        model = model_dict['model']
+        label_encoder = model_dict.get('label_encoder', None)
+        print("Scikit-Learn Classifier loaded successfully!")
+    except Exception as e:
+        print("Error loading model:", e)
+        model = None
+        label_encoder = None
+
+    # 2. MediaPipe Setup
+    try:
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+        print("MediaPipe Hands initialized successfully!")
+    except Exception as e:
+        print("Error initializing MediaPipe:", e)
+        hands = None
 
 @app.websocket("/ws/detect")
 async def detect_sign_language(websocket: WebSocket):
     await websocket.accept()
     print("Client connected to WebSocket")
+    
+    # Load model and MediaPipe on the first WS connection
+    initialize_resources()
+    
     try:
         while True:
             data = await websocket.receive_bytes()
@@ -53,7 +76,7 @@ async def detect_sign_language(websocket: WebSocket):
             np_arr = np.frombuffer(data, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             
-            if frame is None:
+            if frame is None or hands is None:
                 continue
 
             # Flip the frame to match what the model was trained on
