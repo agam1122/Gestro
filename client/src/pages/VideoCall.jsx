@@ -453,9 +453,12 @@ const VideoCall = () => {
         isProcessingRef.current = false
       }
 
-      if (handsInstanceRef.current && rawVideoRef.current && rawVideoRef.current.readyState >= 2) {
+      if (handsInstanceRef.current && rawVideoRef.current && rawVideoRef.current.readyState >= 2 && translationCanvasRef.current) {
         try {
-          await handsInstanceRef.current.send({ image: rawVideoRef.current });
+          const canvas = translationCanvasRef.current
+          const ctx = canvas.getContext("2d")
+          ctx.drawImage(rawVideoRef.current, 0, 0, canvas.width, canvas.height)
+          await handsInstanceRef.current.send({ image: canvas });
         } catch (err) {
           console.error("Sign language pipeline: Error running MediaPipe hands tracker:", err);
         }
@@ -1397,7 +1400,7 @@ const VideoCall = () => {
     <>
       {/* Hidden elements for Canvas streaming (MUST NOT use display:none or browser throttles to 1fps) */}
       <video ref={rawVideoRef} className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" autoPlay playsInline muted />
-      <canvas ref={translationCanvasRef} width="640" height="480" className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" />
+      <canvas ref={translationCanvasRef} width="320" height="240" className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" />
           <motion.div initial={{opacity:0}} animate={{opacity:1}} className='h-full flex flex-col md:flex-row overflow-hidden text-white bg-transparent'>
         
         {/* LEFT: Lobby or Video Call Content */}
