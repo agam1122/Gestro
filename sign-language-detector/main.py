@@ -27,9 +27,11 @@ async def root():
 model = None
 label_encoder = None
 hands = None
+model_error = "Not initialized yet"
+hands_error = "Not initialized yet"
 
 def initialize_resources():
-    global model, label_encoder, hands
+    global model, label_encoder, hands, model_error, hands_error
     if hands is not None:
         return
     
@@ -47,8 +49,10 @@ def initialize_resources():
         model = model_dict['model']
         label_encoder = model_dict.get('label_encoder', None)
         print("Scikit-Learn Classifier loaded successfully!", flush=True)
+        model_error = None
     except Exception as e:
         import traceback
+        model_error = traceback.format_exc()
         print("Error loading model:", e, flush=True)
         traceback.print_exc()
         model = None
@@ -64,11 +68,23 @@ def initialize_resources():
             min_tracking_confidence=0.7
         )
         print("MediaPipe Hands initialized successfully!", flush=True)
+        hands_error = None
     except Exception as e:
         import traceback
+        hands_error = traceback.format_exc()
         print("Error initializing MediaPipe:", e, flush=True)
         traceback.print_exc()
         hands = None
+
+@app.get("/debug")
+async def debug():
+    initialize_resources()
+    return {
+        "model_loaded": model is not None,
+        "hands_loaded": hands is not None,
+        "model_error": model_error,
+        "hands_error": hands_error
+    }
 
 @app.websocket("/ws/detect")
 async def detect_sign_language(websocket: WebSocket):
