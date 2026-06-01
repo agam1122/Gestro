@@ -265,6 +265,7 @@ const VideoCall = () => {
   const isProcessingRef = useRef(false)
   const lastFrameSentTimeRef = useRef(0)
   const isMediaPipeProcessingRef = useRef(false)
+  const hasMediaPipeCrashedRef = useRef(false)
   const activeRoomIdRef = useRef(roomId)
 
   useEffect(() => {
@@ -359,6 +360,7 @@ const VideoCall = () => {
     setCurrentSignTranslation("")
     isProcessingRef.current = false
     isMediaPipeProcessingRef.current = false
+    hasMediaPipeCrashedRef.current = false
   }
 
   const setupSignTranslationPipeline = (videoTrack) => {
@@ -468,6 +470,7 @@ const VideoCall = () => {
     lastFrameSentTimeRef.current = Date.now()
     
     drawLoopWorkerRef.current.onmessage = async () => {
+      if (hasMediaPipeCrashedRef.current) return;
       const now = Date.now()
       
       // Safety reset: if we've been processing for > 2000ms, assume frame was lost and reset lock
@@ -495,11 +498,26 @@ const VideoCall = () => {
           isMediaPipeProcessingRef.current = false
         } catch (err) {
           console.error("Sign language pipeline: Error running MediaPipe hands tracker:", err);
-          isMediaPipeProcessingRef.current = false
+          const errStr = err ? err.toString() : "";
+          if (errStr.includes("RuntimeError") || errStr.includes("bounds") || errStr.includes("memory")) {
+            console.error("Sign language pipeline: Critical WASM memory crash detected. Halting tracking loop.");
+            hasMediaPipeCrashedRef.current = true;
+            toast.error("MediaPipe WebAssembly memory limits exceeded. Please reload the page to restart sign translation.");
+          } else {
+            isMediaPipeProcessingRef.current = false;
+          }
         }
       }
     }
-    drawLoopWorkerRef.current.postMessage('start');
+    
+    // Add a 3-second safety delay to allow MediaPipe's WASM binary and model assets (.tflite, .data)
+    // to finish downloading and compiling before flooding the worker queue.
+    setTimeout(() => {
+      if (drawLoopWorkerRef.current && !hasMediaPipeCrashedRef.current) {
+        console.log("Sign language pipeline: Starting frame loop after safety delay.");
+        drawLoopWorkerRef.current.postMessage('start');
+      }
+    }, 3000);
     
     return videoTrack
   }
