@@ -375,8 +375,8 @@ const VideoCall = () => {
     const wsHost = window.location.hostname
     const isLocalHost = wsHost === 'localhost' || wsHost === '127.0.0.1' || wsHost.startsWith('10.') || wsHost.startsWith('192.168.') || wsHost.startsWith('172.')
     const defaultWsUrl = isLocalHost 
-      ? `ws://${wsHost}:8000/ws/detect` 
-      : `wss://${wsHost}/ws/detect`
+      ? `ws://${wsHost}:8000/ws/detect_dynamic` 
+      : `wss://${wsHost}/ws/detect_dynamic`
     const wsUrl = import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || defaultWsUrl
     console.log("Sign language pipeline: Connecting to WebSocket at", wsUrl)
     mlSocketRef.current = new WebSocket(wsUrl)
@@ -510,14 +510,14 @@ const VideoCall = () => {
       }
     }
     
-    // Add a 3-second safety delay to allow MediaPipe's WASM binary and model assets (.tflite, .data)
+    // Add a 5-second safety delay to allow MediaPipe's WASM binary and model assets (.tflite, .data)
     // to finish downloading and compiling before flooding the worker queue.
     setTimeout(() => {
       if (drawLoopWorkerRef.current && !hasMediaPipeCrashedRef.current) {
         console.log("Sign language pipeline: Starting frame loop after safety delay.");
         drawLoopWorkerRef.current.postMessage('start');
       }
-    }, 3000);
+    }, 5000);
     
     return videoTrack
   }
