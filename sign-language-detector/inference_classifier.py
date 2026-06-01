@@ -44,6 +44,7 @@ last_confirmed_prediction = ""
 
 prediction_history = []
 frames_to_confirm = 20
+last_printed_hands = -1
 
 while True:
 
@@ -187,6 +188,25 @@ while True:
         # Reset so same word can be repeated when hands drop out of frame
         last_confirmed_prediction = ""
         prediction_history = []
+
+    # ==========================
+    # Status display
+    # ==========================
+    num_hands = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
+    if num_hands != last_printed_hands:
+        print(f"Hand detection status: {num_hands} hand(s) in frame", flush=True)
+        last_printed_hands = num_hands
+    status_text = f"Hands detected: {num_hands}"
+    cv2.putText(
+        frame,
+        status_text,
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (0, 0, 255) if num_hands == 0 else (0, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
 
     # ==========================
     # Sentence display

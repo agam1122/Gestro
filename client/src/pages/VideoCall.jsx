@@ -371,7 +371,8 @@ const VideoCall = () => {
     }
 
     const wsHost = window.location.hostname
-    const defaultWsUrl = wsHost === 'localhost' || wsHost === '127.0.0.1' 
+    const isLocalHost = wsHost === 'localhost' || wsHost === '127.0.0.1' || wsHost.startsWith('10.') || wsHost.startsWith('192.168.') || wsHost.startsWith('172.')
+    const defaultWsUrl = isLocalHost 
       ? `ws://${wsHost}:8000/ws/detect` 
       : `wss://${wsHost}/ws/detect`
     const wsUrl = import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || defaultWsUrl
