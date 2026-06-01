@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # Presentation & Client-Side Application (Vite/React)
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:4000
+      - VITE_ML_URL=ws://localhost:8000
+    depends_on:
+      - server
+      - ml-server
+
+  # Core Node.js API server (Express / Socket.io / Clerk / Neon DB / Redis client)
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - DATABASE_URL=postgres://neondb_owner:secret_password_pool@ep-cool-water-a1.aws.neon.tech/gestro_db
+      - REDIS_URL=redis://redis-cache:6379
+      - CLERK_PUBLISHABLE_KEY=pk_test_aG9sc29tZS1hcmNoLTgyLmNsZXJrLmFjY291bnRzLmRldiQ
+      - CLERK_SECRET_KEY=sk_test_secret_clerk_auth_key_55d
+      - GEMINI_API_KEY=AIzaSy_secret_gemini_key_11g
+    depends_on:
+      - redis-cache
+
+  # Real-Time Python ML server (FastAPI / WebSockets / Stacking Classifier / MediaPipe)
+  ml-server:
+    build:
+      context: ./sign-language-detector
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./sign-language-detector:/app
+    environment:
+      - PORT=8000
+      - MODEL_PATH=/app/model.p
+
+  # Redis Hot Data Caching Layer
+  redis-cache:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

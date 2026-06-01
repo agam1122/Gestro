@@ -39,8 +39,8 @@ for j in range(number_of_classes):
             break
 
     # --- PHASE 2: COLLECTION ---
-    counter = 1000
-    while counter < 2000:
+    counter = 2000
+    while counter < 3000:
         ret, frame = cap.read()
         if not ret:
             continue
