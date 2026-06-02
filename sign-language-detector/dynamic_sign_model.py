@@ -7,7 +7,7 @@ class DynamicSignLSTM(nn.Module):
     Processes sequences of 84-dimensional hand landmark coordinates
     over a temporal window (e.g., 30 frames) to predict dynamic sign gestures.
     """
-    def __init__(self, input_dim=84, hidden_dim=128, num_layers=2, num_classes=28, dropout=0.3):
+    def __init__(self, input_dim=84, hidden_dim=64, num_layers=2, num_classes=28, dropout=0.3):
         super(DynamicSignLSTM, self).__init__()
         
         self.hidden_dim = hidden_dim
