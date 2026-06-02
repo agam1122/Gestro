@@ -14,6 +14,7 @@ class SignSequenceDataset(Dataset):
     Otherwise, generates dummy validation data.
     """
     def __init__(self, pickle_path='./sequences.pickle', is_train=True):
+        self.is_train = is_train
         if os.path.exists(pickle_path):
             print(f"Loading real sequence data from {pickle_path}...")
             with open(pickle_path, 'rb') as f:
@@ -44,7 +45,24 @@ class SignSequenceDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx], self.labels[idx]
+        x = self.data[idx]
+        y = self.labels[idx]
+        
+        # Apply augmentation only during training to regularize
+        if self.is_train:
+            # 1. Coordinate Jittering (adds tiny Gaussian noise)
+            noise = torch.randn_like(x) * 0.005
+            x = x + noise
+            
+            # 2. Temporal scaling/jittering (shifts sequence slightly in time with 50% probability)
+            if torch.rand(1).item() < 0.5:
+                shift = torch.randint(-2, 3, (1,)).item()
+                if shift > 0:
+                    x = torch.cat([x[0].repeat(shift, 1), x[:-shift]], dim=0)
+                elif shift < 0:
+                    x = torch.cat([x[-shift:], x[-1].repeat(-shift, 1)], dim=0)
+                    
+        return x, y
 
 def train_model():
     pickle_path = './sequences.pickle'
@@ -57,11 +75,12 @@ def train_model():
         
     # Configurations
     input_dim = 84
-    hidden_dim = 128
+    hidden_dim = 64   # Simpler model structure reduces overfitting on small datasets
     num_layers = 2
     batch_size = 16 if os.path.exists(pickle_path) else 32
-    epochs = 15 if os.path.exists(pickle_path) else 5
+    epochs = 50 if os.path.exists(pickle_path) else 5
     learning_rate = 0.001
+    weight_decay = 1e-4  # L2 Regularization to prevent extreme weights
 
     # Device configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -74,20 +93,28 @@ def train_model():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-
-    # Initialize model, loss and optimizer
+    # Initialize model with increased dropout (0.4) for better regularization
     model = DynamicSignLSTM(
         input_dim=input_dim, 
         hidden_dim=hidden_dim, 
         num_layers=num_layers, 
-        num_classes=num_classes
+        num_classes=num_classes,
+        dropout=0.4
     ).to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # Learning rate scheduler (halves the LR when validation loss flattens for 4 epochs)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=4)
+
+    best_val_loss = float('inf')
+    early_stopping_patience = 10
+    epochs_no_improve = 0
 
     # Training Loop
     for epoch in range(epochs):
+        # 1. Training Phase
         model.train()
         running_loss = 0.0
         correct_preds = 0
@@ -112,11 +139,45 @@ def train_model():
 
         epoch_loss = running_loss / total_samples
         epoch_acc = (correct_preds / total_samples) * 100
-        print(f"Epoch [{epoch+1}/{epochs}] - Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%")
 
-    # Save model weights
-    torch.save(model.state_dict(), 'lstm_sign_model.pth')
-    print("PyTorch Dynamic Sign LSTM Model saved as 'lstm_sign_model.pth'")
+        # 2. Validation Phase
+        model.eval()
+        val_running_loss = 0.0
+        val_correct_preds = 0
+        val_total_samples = 0
+
+        with torch.no_grad():
+            for val_inputs, val_targets in val_loader:
+                val_inputs, val_targets = val_inputs.to(device), val_targets.to(device)
+                val_outputs = model(val_inputs)
+                val_loss = criterion(val_outputs, val_targets)
+
+                val_running_loss += val_loss.item() * val_inputs.size(0)
+                _, val_predicted = torch.max(val_outputs, 1)
+                val_correct_preds += (val_predicted == val_targets).sum().item()
+                val_total_samples += val_targets.size(0)
+
+        val_epoch_loss = val_running_loss / val_total_samples
+        val_epoch_acc = (val_correct_preds / val_total_samples) * 100
+
+        print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.2f}% | Val Loss: {val_epoch_loss:.4f}, Val Acc: {val_epoch_acc:.2f}%")
+
+        # Step scheduler
+        scheduler.step(val_epoch_loss)
+
+        # Check Early Stopping & Save Best Weights
+        if val_epoch_loss < best_val_loss:
+            best_val_loss = val_epoch_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), 'lstm_sign_model.pth')
+            print(f"  --> Saved new best model weights (Val Loss: {val_epoch_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= early_stopping_patience:
+                print(f"Early stopping triggered at epoch {epoch+1}. Restoring best weights.")
+                break
+
+    print("Training finished. Best model weights saved as 'lstm_sign_model.pth'")
 
 if __name__ == "__main__":
     train_model()
