@@ -6,7 +6,9 @@ import toast from 'react-hot-toast';
 import { motion } from 'framer-motion';
 import { GraduationCap, BookOpen, Sparkles, Key } from 'lucide-react';
 
-axios.defaults.baseURL = import.meta.env.VITE_BASE_URL;
+import { getApiBaseUrl } from '../utils/resolveUrl';
+
+axios.defaults.baseURL = getApiBaseUrl();
 
 const Onboarding = () => {
     const { user, isLoaded } = useUser();

@@ -19,7 +19,12 @@ const SignLanguageDetector = () => {
 
   useEffect(() => {
     if (isCameraOpen) {
-      const wsUrl = import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || "ws://127.0.0.1:8000/ws/detect";
+      const wsHost = window.location.hostname;
+      const isLocalHost = wsHost === 'localhost' || wsHost === '127.0.0.1' || wsHost.startsWith('10.') || wsHost.startsWith('192.168.') || wsHost.startsWith('172.');
+      const defaultWsUrl = isLocalHost 
+        ? `ws://${wsHost}:8000/ws/detect_dynamic` 
+        : `wss://${wsHost}/ws/detect_dynamic`;
+      const wsUrl = import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || defaultWsUrl;
       socketRef.current = new WebSocket(wsUrl);
       socketRef.current.onmessage = (event) => {
         const data = JSON.parse(event.data);

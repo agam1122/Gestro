@@ -20,6 +20,7 @@ import {
   X
 } from 'lucide-react'
 import toast from 'react-hot-toast'
+import { getSocketUrl } from '../utils/resolveUrl'
 
 // Single Video Card Component for Responsive Grid
 const VideoCard = ({ stream, screenStream, isScreenSharing, isSignTranslationEnabled, isLocal, userObj, isVideoEnabled, isAudioEnabled, rawStream, signTranslationText, activeVideoMid }) => {
@@ -116,7 +117,7 @@ const VideoCard = ({ stream, screenStream, isScreenSharing, isSignTranslationEna
   )
 }
 
-const SOCKET_URL = import.meta.env.VITE_BASE_URL || 'http://localhost:4000'
+const SOCKET_URL = getSocketUrl()
 
 const peerConfiguration = {
   iceServers: [
@@ -145,7 +146,12 @@ const getGlobalHandsInstance = () => {
   globalHandsPromise = new Promise((resolve) => {
     console.log("Sign language pipeline: Initializing global MediaPipe Hands instance...");
     const hands = new window.Hands({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+      locateFile: (file) => {
+        // Force non-SIMD WebAssembly binaries to resolve memory limits / out of bounds errors
+        // on Safari, Firefox, and older browser engines
+        const targetFile = file.replace("hands_solution_simd_wasm_bin", "hands_solution_wasm_bin");
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${targetFile}`;
+      }
     });
     hands.setOptions({
       maxNumHands: 2,
@@ -266,6 +272,7 @@ const VideoCall = () => {
   const lastFrameSentTimeRef = useRef(0)
   const isMediaPipeProcessingRef = useRef(false)
   const hasMediaPipeCrashedRef = useRef(false)
+  const consecutiveCrashesRef = useRef(0)
   const activeRoomIdRef = useRef(roomId)
 
   useEffect(() => {
@@ -496,14 +503,19 @@ const VideoCall = () => {
           await globalHandsInstance.send({ image: canvas });
           
           isMediaPipeProcessingRef.current = false
+          consecutiveCrashesRef.current = 0
         } catch (err) {
           console.error("Sign language pipeline: Error running MediaPipe hands tracker:", err);
           const errStr = err ? err.toString() : "";
-          if (errStr.includes("RuntimeError") || errStr.includes("bounds") || errStr.includes("memory")) {
-            console.error("Sign language pipeline: Critical WASM memory crash detected. Halting tracking loop.");
+          
+          consecutiveCrashesRef.current = (consecutiveCrashesRef.current || 0) + 1;
+          
+          if (consecutiveCrashesRef.current > 15) {
+            console.error("Sign language pipeline: Critical WASM crash limit reached. Halting tracking loop.");
             hasMediaPipeCrashedRef.current = true;
-            toast.error("MediaPipe WebAssembly memory limits exceeded. Please reload the page to restart sign translation.");
+            toast.error("Sign language translation failed to initialize. Please check your connection and reload the page.");
           } else {
+            // Keep trying - reset processing flag so next frames can try after a short delay
             isMediaPipeProcessingRef.current = false;
           }
         }
@@ -577,6 +589,67 @@ const VideoCall = () => {
     }
   }
 
+  // Ensure both audio and video tracks are completely initialized and negotiated from the start
+  const ensureLocalTracksAcquired = async () => {
+    try {
+      if (!localStreamRef.current) {
+        localStreamRef.current = new MediaStream()
+      }
+
+      let audioTrack = localStreamRef.current.getAudioTracks()[0]
+      let videoTrack = localStreamRef.current.getVideoTracks()[0]
+
+      // 1. Acquire and configure Audio Track if missing
+      if (!audioTrack) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          audioTrack = audioStream.getAudioTracks()[0]
+          audioTrack.enabled = audioEnabled
+          localStreamRef.current.addTrack(audioTrack)
+        } catch (audioErr) {
+          console.warn("Could not acquire microphone track for pre-negotiation:", audioErr)
+        }
+      } else {
+        audioTrack.enabled = audioEnabled
+      }
+
+      // 2. Acquire and configure Video Track if missing
+      if (!videoTrack) {
+        try {
+          const videoStream = await navigator.mediaDevices.getUserMedia({ video: true })
+          let rawVideoTrack = videoStream.getVideoTracks()[0]
+          
+          if (enableSignTranslation) {
+            videoTrack = setupSignTranslationPipeline(rawVideoTrack)
+          } else {
+            videoTrack = rawVideoTrack
+          }
+          
+          videoTrack.enabled = videoEnabled
+          localStreamRef.current.addTrack(videoTrack)
+        } catch (videoErr) {
+          console.warn("Could not acquire camera track for pre-negotiation:", videoErr)
+        }
+      } else {
+        videoTrack.enabled = videoEnabled
+      }
+
+      const updatedStream = new MediaStream(localStreamRef.current.getTracks())
+      localStreamRef.current = updatedStream
+      setLocalStream(updatedStream)
+
+      if (localVideoRef.current) {
+        if (enableSignTranslation && rawCameraStreamRef.current) {
+          localVideoRef.current.srcObject = rawCameraStreamRef.current
+        } else {
+          localVideoRef.current.srcObject = updatedStream
+        }
+      }
+    } catch (err) {
+      console.error("Critical error in ensureLocalTracksAcquired:", err)
+    }
+  }
+
   // Handle toggles before/during call (completely stop tracks to turn camera light off)
   const toggleVideo = async () => {
     const nextState = !videoEnabled
@@ -606,7 +679,11 @@ const VideoCall = () => {
         setLocalStream(newStream)
 
         if (localVideoRef.current) {
-          localVideoRef.current.srcObject = newStream
+          if (enableSignTranslation && rawCameraStreamRef.current) {
+            localVideoRef.current.srcObject = rawCameraStreamRef.current
+          } else {
+            localVideoRef.current.srcObject = newStream
+          }
         }
 
         // Update track on all active peer connections
@@ -614,7 +691,7 @@ const VideoCall = () => {
           try {
             // Only replace track if we are NOT currently screensharing
             if (!screenStreamRef.current) {
-              const videoTransceiver = pc.getTransceivers().find(t => (t.sender.track && t.sender.track.kind === 'video') || (t.receiver.track && t.receiver.track.kind === 'video'))
+              const videoTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')
               const videoSender = videoTransceiver?.sender
               if (videoSender) {
                 await videoSender.replaceTrack(track)
@@ -652,7 +729,7 @@ const VideoCall = () => {
       peerConnectionsRef.current.forEach(async (pc, socketId) => {
         try {
           if (!screenStreamRef.current) {
-            const videoTransceiver = pc.getTransceivers().find(t => (t.sender.track && t.sender.track.kind === 'video') || (t.receiver.track && t.receiver.track.kind === 'video'))
+            const videoTransceiver = pc.getTransceivers().find(t => t.receiver.track.kind === 'video')
             const videoSender = videoTransceiver?.sender
             if (videoSender) {
               await videoSender.replaceTrack(null)
@@ -678,68 +755,10 @@ const VideoCall = () => {
     const nextState = !audioEnabled
     setAudioEnabled(nextState)
 
-    if (nextState) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        const track = stream.getAudioTracks()[0]
-
-        if (localStreamRef.current) {
-          localStreamRef.current.getAudioTracks().forEach(t => {
-            t.stop()
-            localStreamRef.current.removeTrack(t)
-          })
-          localStreamRef.current.addTrack(track)
-        } else {
-          localStreamRef.current = new MediaStream([track])
-        }
-
-        const newStream = new MediaStream(localStreamRef.current.getTracks())
-        localStreamRef.current = newStream
-        setLocalStream(newStream)
-
-        // Update track on all active peer connections
-        peerConnectionsRef.current.forEach(async (pc, socketId) => {
-          try {
-            const audioTransceiver = pc.getTransceivers().find(t => (t.sender.track && t.sender.track.kind === 'audio') || (t.receiver.track && t.receiver.track.kind === 'audio'))
-            const audioSender = audioTransceiver?.sender
-            if (audioSender) {
-              await audioSender.replaceTrack(track)
-            } else {
-              pc.addTrack(track, localStreamRef.current)
-            }
-          } catch (err) {
-            console.error(`Error replacing audio track for peer ${socketId}:`, err)
-          }
-        })
-      } catch (error) {
-        console.error("Error enabling microphone:", error)
-        toast.error("Could not access microphone.")
-        setAudioEnabled(false)
-      }
-    } else {
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach(track => {
-          track.stop()
-          localStreamRef.current.removeTrack(track)
-        })
-      }
-
-      const newStream = localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null
-      localStreamRef.current = newStream
-      setLocalStream(newStream)
-
-      // Update track on all active peer connections
-      peerConnectionsRef.current.forEach(async (pc, socketId) => {
-        try {
-          const audioTransceiver = pc.getTransceivers().find(t => (t.sender.track && t.sender.track.kind === 'audio') || (t.receiver.track && t.receiver.track.kind === 'audio'))
-          const audioSender = audioTransceiver?.sender
-          if (audioSender) {
-            await audioSender.replaceTrack(null)
-          }
-        } catch (err) {
-          console.error(`Error removing audio track for peer ${socketId}:`, err)
-        }
-      })
+    // Simply toggle the enabled property of the existing track
+    let audioTrack = localStreamRef.current?.getAudioTracks()[0]
+    if (audioTrack) {
+      audioTrack.enabled = nextState
     }
 
     // Broadcast state toggle to other peers
@@ -843,11 +862,30 @@ const VideoCall = () => {
     peerConnectionsRef.current.set(remoteSocketId, pc)
     peerRolesRef.current.set(remoteSocketId, isInitiator)
 
-    // Negotiate tracks using addTrack to natively generate transceivers and preserve MSIDs
+    // Always pre-negotiate both audio and video transceivers to prevent mute/unmute and camera toggle failures
+    const audioTrack = localStreamRef.current?.getAudioTracks()[0]
+    const videoTrack = (screenStreamRef.current && screenStreamRef.current.getVideoTracks().length > 0)
+      ? screenStreamRef.current.getVideoTracks()[0]
+      : localStreamRef.current?.getVideoTracks()[0]
+
     if (isInitiator) {
-      getLocalTracksToSend().forEach(track => {
-        try { pc.addTrack(track, localStreamRef.current) } catch (e) {}
-      })
+      try {
+        pc.addTransceiver(audioTrack || 'audio', {
+          direction: 'sendrecv',
+          streams: [localStreamRef.current].filter(Boolean)
+        })
+      } catch (e) {
+        console.error("Error adding audio transceiver:", e)
+      }
+
+      try {
+        pc.addTransceiver(videoTrack || 'video', {
+          direction: 'sendrecv',
+          streams: [localStreamRef.current].filter(Boolean)
+        })
+      } catch (e) {
+        console.error("Error adding video transceiver:", e)
+      }
     }
 
     // (WebRTC DataChannel removed in favor of Socket.io for sign translation reliability)
@@ -986,10 +1024,8 @@ const VideoCall = () => {
       return
     }
 
-    // Ensure we have local stream active
-    if (!localStreamRef.current) {
-      await startLocalStream()
-    }
+    // Ensure we have local stream active and fully configured with both channels
+    await ensureLocalTracksAcquired()
 
     setInCall(true)
     setCallStatus('connecting')

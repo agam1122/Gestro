@@ -64,7 +64,7 @@ export const generateQuestionPaper = async (req, res) => {
 
     // CORE LOGIC: Generate a question paper.
     const response = await AI.models.generateContent({
-      model: "gemini-2.5-flash", 
+      model: "gemini-3-flash-preview", 
       contents: [{ role: "user", parts: [{ text: `Generate a professional engineering college question paper for ${universityName ? universityName + ', ' : ''}Branch: ${branch}, ${semester}, Subject: ${subject}. 
       
 Syllabus to cover:
@@ -160,8 +160,9 @@ export const resumeReview = async (req, res) => {
 
     // Plan check
     const plan = req.plan;
+    const free_usage = req.free_usage;
 
-    if (plan !== "premium") {
+    if (plan !== "premium" && free_usage >= FREE_USAGE_LIMIT) {
       return res.status(403).json({
         success: false,
         message: "Limit reached. Upgrade to continue.",
@@ -280,6 +281,15 @@ ${resumeText}
         ${"resume-review"}
       )
     `;
+
+    // Only update usage if the plan is NOT premium
+    if (plan !== 'premium') {
+      await clerkClient.users.updateUserMetadata(userId, {
+        privateMetadata: {
+          free_usage: free_usage + 1
+        }
+      });
+    }
 
     // Delete uploaded file
     fs.unlinkSync(resume.path);

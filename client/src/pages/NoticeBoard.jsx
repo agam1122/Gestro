@@ -6,7 +6,9 @@ import toast from 'react-hot-toast'
 import { FileText, Loader2, Megaphone, Plus, X, Upload, Pencil, Trash2, BotMessageSquare, Send } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 
-axios.defaults.baseURL = import.meta.env.VITE_BASE_URL
+import { getApiBaseUrl } from '../utils/resolveUrl'
+
+axios.defaults.baseURL = getApiBaseUrl()
 
 const NoticeBoard = () => {
   const { user, isLoaded } = useUser()

@@ -7,7 +7,9 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import useCreationStore from '../store/useCreationStore';
 
-axios.defaults.baseURL = import.meta.env.VITE_BASE_URL;
+import { getApiBaseUrl } from '../utils/resolveUrl';
+
+axios.defaults.baseURL = getApiBaseUrl();
 
 const Dashboard = () => {
 

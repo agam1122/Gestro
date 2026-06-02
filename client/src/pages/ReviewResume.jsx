@@ -7,7 +7,9 @@ import toast from "react-hot-toast";
 import FormData from 'form-data';
 import Markdown from "react-markdown";
 
-axios.defaults.baseURL = import.meta.env.VITE_BASE_URL;
+import { getApiBaseUrl } from '../utils/resolveUrl';
+
+axios.defaults.baseURL = getApiBaseUrl();
 
 const ReviewResume = () => {
   const [input, setInput] = useState('');

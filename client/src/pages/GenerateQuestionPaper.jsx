@@ -10,7 +10,9 @@ import toast from 'react-hot-toast';
 import Markdown from 'react-markdown';
 import html2pdf from 'html2pdf.js';
 
-axios.defaults.baseURL = import.meta.env.VITE_BASE_URL ;
+import { getApiBaseUrl } from '../utils/resolveUrl';
+
+axios.defaults.baseURL = getApiBaseUrl();
 
 const GenerateQuestionPaper = () => {
 
