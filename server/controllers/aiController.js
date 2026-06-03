@@ -298,6 +298,7 @@ ${resumeText}
     return res.json({
       success: true,
       content,
+      resumeText,
     });
 
   } catch (error) {
@@ -307,6 +308,225 @@ ${resumeText}
     return res.status(500).json({
       success: false,
       message: `Error reviewing resume: ${error.message}`,
+    });
+  }
+};
+
+// Summarize Class Transcript using the User Provided API key
+export const summarizeClass = async (req, res) => {
+  try {
+    const { transcript } = req.body;
+    if (!transcript || transcript.trim() === "") {
+      return res.json({
+        success: true,
+        content: "# No class discussion recorded.\n\nCould not generate summary because the transcription logs are empty.",
+      });
+    }
+
+    const UserProvidedAI = new GoogleGenAI({
+      apiKey: process.env.INTERVIEW_API_KEY 
+    });
+
+    const response = await UserProvidedAI.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: `You are an expert academic AI tutor and notes compiler. Analyze the following classroom lecture/discussion transcript between students and teachers, and generate a highly organized, professional class study notes document.
+
+Format the output strictly using Markdown:
+1. Title: An engaging, descriptive title summarizing the main topic of the class (as an H1, e.g., # Understanding WebRTC Architecture).
+2. Lecture Details: Deduced Subject, Topic, Date/Time (if discernible, else omit), and participant count or names mentioned.
+3. Class Executive Summary: A concise, high-level paragraph summarizing the entire discussion.
+4. Key Concepts & Explanations: Identify all key academic/technical concepts discussed. Provide detailed explanations for each in bullet points, utilizing clear Markdown formatting.
+5. Action Items & Assignments: Bullet points outlining any tasks, questions to research, homework assignments, or follow-up topics mentioned.
+
+Here is the classroom transcript log:
+${transcript}` }] }],
+      config: {
+        temperature: 0.7,
+        maxOutputTokens: 2500,
+      }
+    });
+
+    let content = response.text;
+    if (!content) {
+      const candidate = response.candidates?.[0];
+      const parts = candidate?.content?.parts;
+      if (parts && parts.length > 0 && parts[0].text) {
+        content = parts[0].text;
+      }
+    }
+
+    if (!content) {
+      throw new Error("No response received from Gemini API.");
+    }
+
+    return res.json({
+      success: true,
+      content,
+    });
+
+  } catch (error) {
+    console.error("Class Summary Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: `Error generating class summary: ${error.message}`,
+    });
+  }
+};
+
+// Interview Chat Q&A using the User Provided API key
+export const interviewChat = async (req, res) => {
+  try {
+    const { history, resumeText } = req.body;
+    if (!resumeText) {
+      return res.status(400).json({
+        success: false,
+        message: "Resume text is required to conduct the interview.",
+      });
+    }
+
+    const UserProvidedAI = new GoogleGenAI({
+      apiKey: process.env.INTERVIEW_API_KEY 
+    });
+
+    // Format chat history into Gemini's format
+    const contentsArray = [];
+
+    // System instruction directs model persona
+    const systemInstruction = `You are an expert HR and technical interviewer at a premium technology firm. 
+Your task is to conduct an interactive mock job interview specifically tailored to the candidate's resume provided below. 
+
+Instructions:
+1. Conduct the interview step-by-step: ask exactly ONE question at a time.
+2. Wait for the user to respond before asking the next question.
+3. Keep your questions and comments highly realistic, concise, and professional (under 3-4 sentences).
+4. Dive deep into the specific technologies, libraries, concepts, and projects listed on their resume. Challenge their technical explanations.
+5. Do not break character. Do not output markdown lists of questions. Just ask the single next question.
+
+Candidate's Resume Raw Content:
+${resumeText}`;
+
+    // Map history to contents array
+    if (history && history.length > 0) {
+      history.forEach(item => {
+        contentsArray.push({
+          role: item.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: item.text }]
+        });
+      });
+    } else {
+      // First turn: start the interview
+      contentsArray.push({
+        role: 'user',
+        parts: [{ text: "Hello! I am ready to start the mock interview. Please review my resume and ask me the first question." }]
+      });
+    }
+
+    const response = await UserProvidedAI.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: contentsArray,
+      config: {
+        systemInstruction,
+        temperature: 0.7,
+        maxOutputTokens: 500,
+      }
+    });
+
+    let question = response.text;
+    if (!question) {
+      const candidate = response.candidates?.[0];
+      const parts = candidate?.content?.parts;
+      if (parts && parts.length > 0 && parts[0].text) {
+        question = parts[0].text;
+      }
+    }
+
+    if (!question) {
+      throw new Error("Failed to generate interview question from Gemini.");
+    }
+
+    return res.json({
+      success: true,
+      question,
+    });
+
+  } catch (error) {
+    console.error("Interview Chat Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: `Error during mock interview chat: ${error.message}`,
+    });
+  }
+};
+
+// Analyze Interview Performance using the User Provided API key
+export const analyzeInterview = async (req, res) => {
+  try {
+    const { history, resumeText } = req.body;
+    if (!history || history.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No interview history recorded to analyze.",
+      });
+    }
+
+    const UserProvidedAI = new GoogleGenAI({
+      apiKey: process.env.CHATBOT_API_KEY 
+    });
+
+    // Format chat logs for evaluation prompt
+    const formattedTranscript = history
+      .map(item => `${item.role === 'assistant' ? 'Interviewer' : 'Candidate'}: ${item.text}`)
+      .join("\n\n");
+
+    const prompt = `You are a senior recruiter and technical director. Evaluate the following job interview transcript where the candidate responded to questions based on their resume.
+
+Provide a comprehensive, professional evaluation report. Format the output strictly as Markdown:
+1. Title: Executive Interview Evaluation Report (as H1, e.g. # Interview Performance Evaluation).
+2. Overall Assessment: A paragraph summarizing the candidate's general communication, technical level, and poise.
+3. Key Strengths: Bullet points highlighting what they answered well.
+4. Areas for Improvement: Detailed bullet points highlighting incorrect technical definitions, weak project explanations, or gaps.
+5. Corrections & Best Phrasings: Provide specific corrections for their weak/incorrect answers, illustrating how they should have phrased them professionally.
+6. Overall Score: A numerical score out of 100 (e.g. **Score: 82/100**).
+7. Final Recommendations: Actionable steps they should take before their real interview.
+
+Candidate's Resume Raw Content:
+${resumeText}
+
+Interview Session Transcript:
+${formattedTranscript}`;
+
+    const response = await UserProvidedAI.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.7,
+        maxOutputTokens: 2500,
+      }
+    });
+
+    let content = response.text;
+    if (!content) {
+      const candidate = response.candidates?.[0];
+      const parts = candidate?.content?.parts;
+      if (parts && parts.length > 0 && parts[0].text) {
+        content = parts[0].text;
+      }
+    }
+
+    if (!content) {
+      throw new Error("No evaluation report generated from Gemini API.");
+    }
+
+    return res.json({
+      success: true,
+      content,
+    });
+
+  } catch (error) {
+    console.error("Interview Evaluation Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: `Error evaluating interview: ${error.message}`,
     });
   }
 };

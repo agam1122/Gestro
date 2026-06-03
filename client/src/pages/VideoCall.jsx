@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { useSearchParams } from 'react-router-dom'
-import { useUser } from '@clerk/clerk-react'
+import { useSearchParams, useLocation, useNavigate } from 'react-router-dom'
+import { useUser, useAuth } from '@clerk/clerk-react'
 import { io } from 'socket.io-client'
+import axios from 'axios'
 import { 
   Video, 
   VideoOff, 
@@ -17,13 +18,18 @@ import {
   User,
   Sparkles,
   Check,
-  X
+  X,
+  Eraser,
+  Hash,
+  Palette,
+  BookOpen
 } from 'lucide-react'
 import toast from 'react-hot-toast'
+import html2pdf from 'html2pdf.js'
 import { getSocketUrl } from '../utils/resolveUrl'
 
 // Single Video Card Component for Responsive Grid
-const VideoCard = ({ stream, screenStream, isScreenSharing, isSignTranslationEnabled, isLocal, userObj, isVideoEnabled, isAudioEnabled, rawStream, signTranslationText, activeVideoMid }) => {
+const VideoCard = ({ stream, screenStream, isScreenSharing, isSignTranslationEnabled, isLocal, userObj, isVideoEnabled, isAudioEnabled, rawStream, signTranslationText, activeVideoMid, minHeightClass = 'min-h-[180px]' }) => {
   const videoRef = useRef(null)
 
   // Physically strip zombie tracks from the stream to ensure HTML5 video seamlessly plays the active track
@@ -71,7 +77,7 @@ const VideoCard = ({ stream, screenStream, isScreenSharing, isSignTranslationEna
   const showVideo = (isVideoEnabled || isScreenSharing) && (stream || rawStream || screenStream)
 
   return (
-    <div className='relative w-full aspect-video bg-black/40 border border-white/10 rounded-2xl overflow-hidden shadow-lg flex items-center justify-center min-h-[180px]'>
+    <div className={`relative w-full aspect-video bg-black/40 border border-white/10 rounded-2xl overflow-hidden shadow-lg flex items-center justify-center ${minHeightClass}`}>
       <video 
         ref={videoRef}
         autoPlay 
@@ -229,6 +235,10 @@ const VideoCall = () => {
   const [searchParams, setSearchParams] = useSearchParams()
   const urlRoomId = searchParams.get('room') || ''
 
+  const location = useLocation()
+  const navigate = useNavigate()
+  const isCallRoute = location.pathname === '/ai/video-call'
+
   // UI State
   const [roomId, setRoomId] = useState(urlRoomId)
   const [inCall, setInCall] = useState(false)
@@ -237,9 +247,29 @@ const VideoCall = () => {
   const [audioEnabled, setAudioEnabled] = useState(false)
   const [enableSignTranslation, setEnableSignTranslation] = useState(false)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
+  const [screenShareRequestStatus, setScreenShareRequestStatus] = useState('idle') // idle, requested, approved
   const [currentSignTranslation, setCurrentSignTranslation] = useState("")
   const [isChatOpen, setIsChatOpen] = useState(false)
+  const [transcripts, setTranscripts] = useState([])
+  const [isTranscriptOpen, setIsTranscriptOpen] = useState(false)
+  const [aiSummary, setAiSummary] = useState("")
+  const [isSummarizing, setIsSummarizing] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [showWhiteboard, setShowWhiteboard] = useState(false)
+  const [brushColor, setBrushColor] = useState('#ffffff')
+  const [brushSize, setBrushSize] = useState(4)
+  const [isEraser, setIsEraser] = useState(false)
+  const [isNotesOpen, setIsNotesOpen] = useState(false)
+  const [notes, setNotes] = useState(() => {
+    return localStorage.getItem('classroom_notes_' + urlRoomId) || ''
+  })
+
+  // Auto-save notes to localStorage
+  useEffect(() => {
+    if (roomId) {
+      localStorage.setItem('classroom_notes_' + roomId, notes)
+    }
+  }, [notes, roomId])
   
   // Chat State
   const [messages, setMessages] = useState([])
@@ -258,6 +288,8 @@ const VideoCall = () => {
   const localVideoRef = useRef(null)
   const localStreamRef = useRef(null)
   const screenStreamRef = useRef(null)
+  const audioContextRef = useRef(null)
+  const recognitionRef = useRef(null)
   const chatEndRef = useRef(null)
 
   // Sign Language Pipeline Refs
@@ -274,6 +306,9 @@ const VideoCall = () => {
   const hasMediaPipeCrashedRef = useRef(false)
   const consecutiveCrashesRef = useRef(0)
   const activeRoomIdRef = useRef(roomId)
+  const whiteboardCanvasRef = useRef(null)
+  const isDrawingRef = useRef(false)
+  const lastDrawingCoordsRef = useRef({ x: 0, y: 0 })
 
   useEffect(() => {
     activeRoomIdRef.current = roomId
@@ -771,18 +806,32 @@ const VideoCall = () => {
     }
   }
 
-  // Initialize socket connection and stream preview on mount / url param change
+  // Manage call preview lifecycle based on route visibility and call state
   useEffect(() => {
-    if (urlRoomId) {
-      setRoomId(urlRoomId)
+    if (isCallRoute) {
+      // User is on the video-call page
+      if (urlRoomId && urlRoomId !== roomId && !inCall) {
+        setRoomId(urlRoomId)
+      }
+      // Start local stream preview for the lobby if not in a call and no stream exists yet
+      if (!inCall && !localStreamRef.current) {
+        startLocalStream()
+      }
+    } else {
+      // User has navigated away
+      if (!inCall) {
+        // Not in a call: stop the lobby preview stream so camera is released
+        cleanupCall()
+      }
     }
-    
-    startLocalStream()
+  }, [isCallRoute, urlRoomId, inCall])
 
+  // Cleanup on final component unmount
+  useEffect(() => {
     return () => {
       cleanupCall()
     }
-  }, [urlRoomId])
+  }, [])
 
   // Sync media streams to video elements whenever they are mounted or updated
   useEffect(() => {
@@ -791,9 +840,120 @@ const VideoCall = () => {
     }
   }, [localStream])
 
+  // Web Speech API Transcription Loop
+  useEffect(() => {
+    let active = true
+    let restartTimer = null
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    
+    const startRecognition = () => {
+      if (!active || !inCall || !audioEnabled || !SpeechRecognition) return
+
+      console.log("Speech recognition: Starting transcription loop with fresh instance.")
+      
+      // Stop and clean up any existing instance first
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch (e) {}
+        recognitionRef.current = null
+      }
+
+      try {
+        const rec = new SpeechRecognition()
+        rec.continuous = true
+        rec.interimResults = false
+        rec.lang = 'en-US'
+        
+        rec.onresult = (event) => {
+          if (!active) return
+          const lastResultIndex = event.results.length - 1
+          const text = event.results[lastResultIndex][0].transcript.trim()
+          
+          if (text && socketRef.current) {
+            socketRef.current.emit("classroom-transcript", {
+              roomId,
+              text,
+              name: user?.fullName || 'User'
+            })
+            
+            // Add statement to local transcripts state
+            setTranscripts(prev => [
+              ...prev,
+              {
+                name: 'You',
+                text,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              }
+            ])
+          }
+        }
+        
+        rec.onerror = (e) => {
+          console.error("Speech recognition error:", e.error, e)
+          if (e.error === 'not-allowed') {
+            console.warn("Speech recognition permission denied. Disabling auto-restart.")
+            active = false
+          }
+        }
+        
+        rec.onend = () => {
+          if (active && inCall && audioEnabled) {
+            // Add a safety delay before restarting to prevent collisions with device release
+            restartTimer = setTimeout(() => {
+              startRecognition()
+            }, 400)
+          }
+        }
+        
+        recognitionRef.current = rec
+        rec.start()
+      } catch (err) {
+        console.error("Error starting SpeechRecognition:", err)
+        if (active && inCall && audioEnabled) {
+          restartTimer = setTimeout(() => {
+            startRecognition()
+          }, 2000) // Retry starting after 2 seconds
+        }
+      }
+    }
+
+    if (inCall && audioEnabled && SpeechRecognition) {
+      startRecognition()
+    } else {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch (err) {}
+        recognitionRef.current = null
+      }
+    }
+    
+    return () => {
+      active = false
+      if (restartTimer) clearTimeout(restartTimer)
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch (err) {}
+        recognitionRef.current = null
+      }
+    }
+  }, [inCall, audioEnabled, roomId])
+
   // Clean up all streams and socket connections
   const cleanupCall = () => {
     cleanupSignTranslation()
+
+    // Close AudioContext if active
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close()
+      } catch (err) {
+        console.error("Error closing AudioContext on cleanup:", err)
+      }
+      audioContextRef.current = null
+    }
     
     // Stop local camera stream
     if (localStreamRef.current) {
@@ -831,9 +991,13 @@ const VideoCall = () => {
     setLocalStream(null)
     setPeers([])
     setIsScreenSharing(false)
+    setScreenShareRequestStatus('idle')
     setInCall(false)
     setCallStatus('idle')
     setMessages([])
+    setTranscripts([])
+    setAiSummary("")
+    setIsTranscriptOpen(false)
   }
 
   const handlePeerDisconnect = (socketId) => {
@@ -1016,6 +1180,273 @@ const VideoCall = () => {
     return pc
   }
 
+  // Initialize Whiteboard Canvas State
+  useEffect(() => {
+    if (inCall && whiteboardCanvasRef.current) {
+      const canvas = whiteboardCanvasRef.current
+      if (!canvas.dataset.initialized) {
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          canvas.width = 800
+          canvas.height = 500
+          ctx.fillStyle = '#0f172a'
+          ctx.fillRect(0, 0, canvas.width, canvas.height)
+          canvas.dataset.initialized = "true"
+        }
+      }
+    }
+  }, [inCall, showWhiteboard])
+
+  const getMousePos = (e) => {
+    const canvas = whiteboardCanvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    const rect = canvas.getBoundingClientRect()
+    
+    // Support mobile touch events
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY
+    
+    // Scale coordinates to fit the 800x500 local canvas resolution
+    return {
+      x: ((clientX - rect.left) / rect.width) * canvas.width,
+      y: ((clientY - rect.top) / rect.height) * canvas.height
+    }
+  }
+
+  const handleCanvasMouseDown = (e) => {
+    const coords = getMousePos(e)
+    isDrawingRef.current = true
+    lastDrawingCoordsRef.current = coords
+  }
+
+  const handleCanvasMouseMove = (e) => {
+    if (!isDrawingRef.current || !whiteboardCanvasRef.current) return
+    
+    // Prevent touch scrolling on mobile devices while drawing
+    if (e.cancelable) e.preventDefault()
+    
+    const coords = getMousePos(e)
+    const canvas = whiteboardCanvasRef.current
+    const ctx = canvas.getContext("2d")
+    
+    if (ctx) {
+      const color = isEraser ? '#0f172a' : brushColor
+      ctx.beginPath()
+      ctx.strokeStyle = color
+      ctx.lineWidth = brushSize
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+      ctx.moveTo(lastDrawingCoordsRef.current.x, lastDrawingCoordsRef.current.y)
+      ctx.lineTo(coords.x, coords.y)
+      ctx.stroke()
+      
+      if (socketRef.current) {
+        socketRef.current.emit("whiteboard-draw", {
+          roomId,
+          prevX: lastDrawingCoordsRef.current.x,
+          prevY: lastDrawingCoordsRef.current.y,
+          x: coords.x,
+          y: coords.y,
+          color,
+          size: brushSize
+        })
+      }
+      
+      lastDrawingCoordsRef.current = coords
+    }
+  }
+
+  const handleCanvasMouseUp = () => {
+    isDrawingRef.current = false
+  }
+
+  const handleClearWhiteboard = () => {
+    if (!isTeacher) return
+    const canvas = whiteboardCanvasRef.current
+    if (canvas) {
+      const ctx = canvas.getContext("2d")
+      if (ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.fillStyle = '#0f172a'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+      }
+    }
+    if (socketRef.current) {
+      socketRef.current.emit("whiteboard-clear", { roomId })
+    }
+  }
+
+  // Exports classroom notepad notes to a beautifully styled PDF
+  const exportNotesPDF = () => {
+    if (!notes.trim()) {
+      toast.error("Notepad is empty. Write some notes first!")
+      return
+    }
+
+    const toastId = toast.loading("Generating PDF...")
+    try {
+      const element = document.createElement('div')
+      element.innerHTML = `
+        <div style="font-family: 'Georgia', 'Times New Roman', serif; padding: 40px; background: #fffbeb; color: #1e293b; border: 3px double #b45309; min-height: 800px; display: flex; flex-direction: column; justify-content: space-between; box-sizing: border-box;">
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #b45309; padding-bottom: 12px; margin-bottom: 30px;">
+              <div>
+                <h1 style="font-size: 22px; color: #78350f; font-weight: bold; margin: 0; letter-spacing: 0.05em;">CLASSROOM STUDY NOTES</h1>
+                <p style="font-size: 10px; color: #92400e; margin: 4px 0 0 0; font-family: monospace; text-transform: uppercase; letter-spacing: 0.1em;">GESTRO Video Classroom</p>
+              </div>
+              <div style="text-align: right;">
+                <p style="font-size: 11px; color: #78350f; font-weight: bold; margin: 0;">DATE: ${new Date().toLocaleDateString()}</p>
+                <p style="font-size: 9px; color: #92400e; margin: 2px 0 0 0; font-family: monospace;">ROOM ID: ${roomId}</p>
+              </div>
+            </div>
+            
+            <div style="font-size: 13px; line-height: 1.7; white-space: pre-wrap; color: #334155; padding: 0 10px;">
+              ${notes.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}
+            </div>
+          </div>
+          
+          <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; text-align: center; font-size: 9px; color: #94a3b8; margin-top: 40px; font-family: monospace; letter-spacing: 0.05em;">
+            &bull; DOWNLOADED FROM GESTRO VIDEO CLASSROOM &bull; KEEP FOCUSING &bull;
+          </div>
+        </div>
+      `
+      
+      const options = {
+        margin: 10,
+        filename: `Classroom-Notes-${roomId}-${new Date().toISOString().slice(0, 10)}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      }
+
+      html2pdf().from(element).set(options).save().then(() => {
+        toast.dismiss(toastId)
+        toast.success("PDF downloaded successfully!")
+      }).catch(err => {
+        toast.dismiss(toastId)
+        console.error("PDF generation failed:", err)
+        toast.error("Failed to generate PDF.")
+      })
+    } catch (error) {
+      toast.dismiss(toastId)
+      console.error("PDF generation error:", error)
+      toast.error("Failed to generate PDF.")
+    }
+  }
+
+  const { getToken } = useAuth()
+
+  const handleGenerateClassSummary = async () => {
+    if (transcripts.length === 0) {
+      toast.error("Transcript is empty. Please speak in the call first.")
+      return
+    }
+
+    setIsSummarizing(true)
+    setAiSummary("")
+    const toastId = toast.loading("AI is generating lecture summary & notes...")
+
+    try {
+      const formattedTranscript = transcripts
+        .map(t => `[${t.time}] ${t.name}: ${t.text}`)
+        .join("\n")
+
+      const token = await getToken()
+      
+      const { data } = await axios.post('/api/ai/summarize-class', {
+        transcript: formattedTranscript
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+
+      if (data.success && data.content) {
+        setAiSummary(data.content)
+        toast.dismiss(toastId)
+        toast.success("Summary generated successfully!")
+      } else {
+        toast.dismiss(toastId)
+        toast.error(data.message || "Failed to generate class summary.")
+      }
+    } catch (err) {
+      toast.dismiss(toastId)
+      console.error("AI summarization failed:", err)
+      toast.error("An error occurred during AI summarization.")
+    } finally {
+      setIsSummarizing(false)
+    }
+  }
+
+  const exportSummaryPDF = () => {
+    if (!aiSummary) return
+    const toastId = toast.loading("Generating PDF...")
+
+    try {
+      const element = document.createElement('div')
+      element.innerHTML = `
+        <div style="padding: 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; background-color: #ffffff; min-height: 297mm; box-sizing: border-box; line-height: 1.6;">
+          <div style="border-bottom: 2px solid #6366f1; padding-bottom: 20px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <h1 style="color: #4f46e5; margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.025em; text-transform: uppercase;">Gestro AI Class Summary</h1>
+              <p style="color: #64748b; margin: 5px 0 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em;">Classroom Study Guide & Summary Notes</p>
+            </div>
+            <div style="text-align: right;">
+              <span style="background-color: #f1f5f9; color: #475569; padding: 6px 12px; border-radius: 20px; font-size: 10px; font-weight: bold; border: 1px solid #e2e8f0; font-family: monospace;">ROOM: ${roomId}</span>
+              <p style="color: #94a3b8; margin: 5px 0 0 0; font-size: 10px; font-weight: 500;">Date: ${new Date().toLocaleDateString()}</p>
+            </div>
+          </div>
+          
+          <div style="font-size: 13px; color: #334155; margin-bottom: 30px; line-height: 1.8;">
+            ${aiSummary.split('\n').map(line => {
+              const clean = line.trim()
+              if (clean.startsWith('# ')) {
+                return `<h1 style="color: #1e1b4b; font-size: 20px; font-weight: 800; margin-top: 25px; margin-bottom: 12px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">${clean.replace('# ', '')}</h1>`
+              } else if (clean.startsWith('## ')) {
+                return `<h2 style="color: #312e81; font-size: 16px; font-weight: 700; margin-top: 20px; margin-bottom: 10px;">${clean.replace('## ', '')}</h2>`
+              } else if (clean.startsWith('### ')) {
+                return `<h3 style="color: #4338ca; font-size: 14px; font-weight: 700; margin-top: 15px; margin-bottom: 8px;">${clean.replace('### ', '')}</h3>`
+              } else if (clean.startsWith('- ') || clean.startsWith('* ')) {
+                return `<li style="margin-left: 20px; margin-bottom: 6px; list-style-type: square; color: #475569;">${clean.replace(/^[-*]\s+/, '')}</li>`
+              } else if (clean.match(/^\d+\.\s+/)) {
+                return `<li style="margin-left: 20px; margin-bottom: 6px; list-style-type: decimal; color: #475569;">${clean.replace(/^\d+\.\s+/, '')}</li>`
+              } else if (clean === '') {
+                return '<div style="height: 10px;"></div>'
+              } else {
+                return `<p style="margin: 0 0 10px 0; color: #334155;">${clean}</p>`
+              }
+            }).join('')}
+          </div>
+          
+          <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; text-align: center; font-size: 9px; color: #94a3b8; margin-top: 40px; font-family: monospace; letter-spacing: 0.05em;">
+            &bull; GENERATED VIA GESTRO AI STUDY ENGINE &bull;
+          </div>
+        </div>
+      `
+
+      const options = {
+        margin: 10,
+        filename: `Gestro-AI-Class-Summary-${roomId}-${new Date().toISOString().slice(0, 10)}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      }
+
+      html2pdf().from(element).set(options).save().then(() => {
+        toast.dismiss(toastId)
+        toast.success("Class Notes PDF downloaded successfully!")
+      }).catch(err => {
+        toast.dismiss(toastId)
+        console.error("PDF generation failed:", err)
+        toast.error("Failed to generate PDF.")
+      })
+    } catch (error) {
+      toast.dismiss(toastId)
+      console.error("PDF generation error:", error)
+      toast.error("An error occurred during PDF generation.")
+    }
+  }
+
   // Join video call room
   const joinCall = async (e) => {
     if (e) e.preventDefault()
@@ -1052,6 +1483,70 @@ const VideoCall = () => {
       setPeers(prev => prev.map(p => p.socketId === senderId ? { ...p, signTranslationText: text } : p))
     })
 
+    socket.on("classroom-transcript", ({ name, text }) => {
+      setTranscripts(prev => [
+        ...prev,
+        {
+          name,
+          text,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ])
+    })
+
+    socket.on("screen-share-request", ({ studentId, name }) => {
+      if (isTeacher) {
+        toast((t) => (
+          <div className="flex flex-col gap-2 p-1 text-left">
+            <p className="text-sm font-semibold text-slate-100">
+              <span className="text-purple-400 font-bold">{name}</span> wants to share their screen.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => {
+                  socket.emit("approve-screen-share", { studentId, roomId: activeRoomIdRef.current })
+                  toast.dismiss(t.id)
+                }}
+                className="px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded cursor-pointer transition-colors"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => {
+                  socket.emit("deny-screen-share", { studentId, roomId: activeRoomIdRef.current })
+                  toast.dismiss(t.id)
+                }}
+                className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded cursor-pointer transition-colors"
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        ), {
+          duration: 10000,
+          style: {
+            background: '#0f172a',
+            border: '1px solid rgba(147, 51, 234, 0.3)',
+            color: '#fff',
+            padding: '12px'
+          }
+        })
+      }
+    })
+
+    socket.on("screen-share-approved", () => {
+      toast.success("Teacher approved your screen share request!")
+      setScreenShareRequestStatus('approved')
+      setTimeout(() => {
+        toggleScreenShare()
+      }, 300)
+    })
+
+    socket.on("screen-share-denied", () => {
+      toast.error("Your screen share request was denied by the teacher.")
+      setScreenShareRequestStatus('idle')
+    })
+
     socket.on("error-message", (data) => {
       toast.error(data.message)
       cleanupCall()
@@ -1067,6 +1562,9 @@ const VideoCall = () => {
     socket.on("joined-room", async ({ roomId, existingUsers }) => {
       console.log("Successfully joined room:", roomId, "Existing users:", existingUsers)
       toast.success(`Joined room: ${roomId}`)
+      
+      // Request whiteboard state from existing users
+      socket.emit("request-whiteboard-state", { roomId, targetId: socket.id })
       
       if (existingUsers && existingUsers.length > 0) {
         for (const existingUser of existingUsers) {
@@ -1272,6 +1770,78 @@ const VideoCall = () => {
       toast.error("A participant left the call")
       handlePeerDisconnect(socketId)
     })
+
+    // Collaborative Whiteboard listeners
+    socket.on("whiteboard-draw", ({ prevX, prevY, x, y, color, size }) => {
+      const canvas = whiteboardCanvasRef.current
+      if (canvas) {
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          if (!canvas.dataset.initialized) {
+            canvas.width = 800
+            canvas.height = 500
+            ctx.fillStyle = '#0f172a'
+            ctx.fillRect(0, 0, canvas.width, canvas.height)
+            canvas.dataset.initialized = "true"
+          }
+          ctx.beginPath()
+          ctx.strokeStyle = color
+          ctx.lineWidth = size
+          ctx.lineCap = 'round'
+          ctx.lineJoin = 'round'
+          ctx.moveTo(prevX, prevY)
+          ctx.lineTo(x, y)
+          ctx.stroke()
+        }
+      }
+    })
+
+    socket.on("whiteboard-clear", () => {
+      const canvas = whiteboardCanvasRef.current
+      if (canvas) {
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          if (!canvas.dataset.initialized) {
+            canvas.width = 800
+            canvas.height = 500
+            canvas.dataset.initialized = "true"
+          }
+          ctx.clearRect(0, 0, canvas.width, canvas.height)
+          ctx.fillStyle = '#0f172a'
+          ctx.fillRect(0, 0, canvas.width, canvas.height)
+        }
+      }
+    })
+
+    socket.on("request-whiteboard-state", ({ targetId }) => {
+      const canvas = whiteboardCanvasRef.current
+      if (canvas && socketRef.current) {
+        const dataUrl = canvas.toDataURL()
+        socketRef.current.emit("send-whiteboard-state", { targetId, dataUrl })
+      }
+    })
+
+    socket.on("whiteboard-state", ({ dataUrl }) => {
+      const canvas = whiteboardCanvasRef.current
+      if (canvas) {
+        const ctx = canvas.getContext("2d")
+        if (ctx) {
+          if (!canvas.dataset.initialized) {
+            canvas.width = 800
+            canvas.height = 500
+            ctx.fillStyle = '#0f172a'
+            ctx.fillRect(0, 0, canvas.width, canvas.height)
+            canvas.dataset.initialized = "true"
+          }
+          const img = new Image()
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height)
+            ctx.drawImage(img, 0, 0)
+          }
+          img.src = dataUrl
+        }
+      }
+    })
   }
 
   // Send Text Message
@@ -1311,6 +1881,31 @@ const VideoCall = () => {
       }
       
       setIsScreenSharing(false)
+      setScreenShareRequestStatus('idle')
+
+      // Close AudioContext if active
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close()
+        } catch (err) {
+          console.error("Error closing AudioContext on screen share stop:", err)
+        }
+        audioContextRef.current = null
+      }
+
+      // Revert track on all peer connections to mic track
+      const micTrack = localStreamRef.current?.getAudioTracks()[0]
+      if (micTrack) {
+        peerConnectionsRef.current.forEach(pc => {
+          const senders = pc.getSenders()
+          const audioSender = senders.find(s => s.track && s.track.kind === 'audio')
+          if (audioSender) {
+            audioSender.replaceTrack(micTrack).catch(err => {
+              console.error("Error reverting audio track back to microphone:", err)
+            })
+          }
+        })
+      }
       
       const cameraTrack = localStreamRef.current?.getVideoTracks()[0]
       
@@ -1353,11 +1948,61 @@ const VideoCall = () => {
       }
     } else {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
         screenStreamRef.current = screenStream
         const screenTrack = screenStream.getVideoTracks()[0]
+        const screenAudioTrack = screenStream.getAudioTracks()[0]
 
         setIsScreenSharing(true)
+
+        // Web Audio Context mixing for screen audio + mic audio
+        let activeAudioTrack = null
+        const micTrack = localStreamRef.current?.getAudioTracks()[0]
+
+        if (screenAudioTrack) {
+          if (micTrack) {
+            try {
+              const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+              audioContextRef.current = audioCtx
+              
+              const mixedDest = audioCtx.createMediaStreamAudioDestination()
+              
+              // Connect microphone source
+              const micStream = new MediaStream([micTrack])
+              const micSource = audioCtx.createMediaStreamSource(micStream)
+              micSource.connect(mixedDest)
+              
+              // Connect screen audio source
+              const screenAudioStream = new MediaStream([screenAudioTrack])
+              const screenSource = audioCtx.createMediaStreamSource(screenAudioStream)
+              screenSource.connect(mixedDest)
+              
+              if (audioCtx.state === 'suspended') {
+                await audioCtx.resume()
+              }
+              
+              activeAudioTrack = mixedDest.stream.getAudioTracks()[0]
+            } catch (err) {
+              console.error("Failed to initialize Web Audio mixing, falling back to screen audio only:", err)
+              activeAudioTrack = screenAudioTrack
+            }
+          } else {
+            activeAudioTrack = screenAudioTrack
+          }
+        }
+
+        // Replace active audio sender tracks on all peer connections
+        if (activeAudioTrack) {
+          peerConnectionsRef.current.forEach(pc => {
+            const senders = pc.getSenders()
+            const audioSender = senders.find(s => s.track && s.track.kind === 'audio')
+            if (audioSender) {
+              audioSender.replaceTrack(activeAudioTrack).catch(err => {
+                console.error("Error replacing audio track with screen audio/mix:", err)
+              })
+            }
+          })
+        }
 
         // Replace local video track with screen share track
         peerConnectionsRef.current.forEach(async (pc, socketId) => {
@@ -1410,6 +2055,32 @@ const VideoCall = () => {
             screenStreamRef.current = null
           }
           setIsScreenSharing(false)
+          setScreenShareRequestStatus('idle')
+
+          // Close AudioContext if active
+          if (audioContextRef.current) {
+            try {
+              audioContextRef.current.close()
+            } catch (err) {
+              console.error("Error closing AudioContext on screen share stop:", err)
+            }
+            audioContextRef.current = null
+          }
+
+          // Revert track back to microphone
+          const micTrack = localStreamRef.current?.getAudioTracks()[0]
+          if (micTrack) {
+            peerConnectionsRef.current.forEach(pc => {
+              const senders = pc.getSenders()
+              const audioSender = senders.find(s => s.track && s.track.kind === 'audio')
+              if (audioSender) {
+                audioSender.replaceTrack(micTrack).catch(err => {
+                  console.error("Error reverting audio track back to microphone:", err)
+                })
+              }
+            })
+          }
+
           const camTrack = localStreamRef.current?.getVideoTracks()[0]
           peerConnectionsRef.current.forEach(async (pc, socketId) => {
             try {
@@ -1458,6 +2129,33 @@ const VideoCall = () => {
     }
   }
 
+  const handleScreenShareClick = () => {
+    if (isTeacher) {
+      toggleScreenShare()
+      return
+    }
+
+    // Student role request screen share flow
+    if (isScreenSharing) {
+      toggleScreenShare()
+    } else {
+      if (screenShareRequestStatus === 'approved') {
+        toggleScreenShare()
+      } else if (screenShareRequestStatus === 'requested') {
+        toast.loading("Waiting for teacher's approval...", { id: 'screen-share-pending', duration: 2000 })
+      } else {
+        setScreenShareRequestStatus('requested')
+        toast.success("Screen share request sent to the teacher.")
+        if (socketRef.current) {
+          socketRef.current.emit("request-screen-share", { 
+            roomId, 
+            name: user?.fullName || 'Student' 
+          })
+        }
+      }
+    }
+  }
+
   // Generate random Room ID
   const generateRoomId = () => {
     const rand = Math.random().toString(36).substring(2, 7) + '-' + Math.random().toString(36).substring(2, 7)
@@ -1485,12 +2183,125 @@ const VideoCall = () => {
     setSearchParams({}) // Clear url param
   }
 
+  if (!isCallRoute) {
+    if (!inCall) return null
+
+    // We are active in a call, but navigated away. Render premium floating widget.
+    const activePeer = peers[0]
+    
+    return (
+      <>
+        {/* Hidden elements for Canvas streaming (MUST NOT use display:none or browser throttles to 1fps) */}
+        <video ref={rawVideoRef} className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" autoPlay playsInline muted />
+        <canvas ref={translationCanvasRef} width="320" height="240" className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" />
+        
+        <div 
+          className="fixed bottom-6 right-6 z-50 w-[280px] bg-slate-900/95 border border-purple-500/30 backdrop-blur-xl rounded-2xl shadow-2xl overflow-hidden flex flex-col gap-2 p-3 text-white transition-all duration-300"
+          style={{ boxShadow: '0 10px 30px -5px rgba(139, 92, 246, 0.25), 0 0 15px rgba(139, 92, 246, 0.1)' }}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[10px] font-bold tracking-wider uppercase text-purple-300">
+                Gestro Call Active
+              </span>
+            </div>
+            <span className="text-[9px] text-slate-400 font-mono bg-white/5 px-2 py-0.5 rounded border border-white/5">
+              Room: {roomId}
+            </span>
+          </div>
+
+          {/* Small Video Box */}
+          <div className="relative w-full aspect-video rounded-xl overflow-hidden border border-white/10 bg-black/40">
+            {activePeer ? (
+              <VideoCard
+                key={activePeer.socketId}
+                stream={activePeer.stream}
+                screenStream={null}
+                isScreenSharing={activePeer.isScreenSharing || false}
+                isLocal={false}
+                signTranslationText={activePeer.signTranslationText}
+                userObj={activePeer.user}
+                isVideoEnabled={activePeer.videoEnabled !== false}
+                isAudioEnabled={activePeer.audioEnabled !== false}
+                activeVideoMid={activePeer.activeVideoMid}
+                minHeightClass="min-h-0"
+              />
+            ) : (
+              <VideoCard
+                stream={localStream}
+                rawStream={rawCameraStreamRef.current}
+                screenStream={screenStreamRef.current}
+                isScreenSharing={isScreenSharing}
+                isSignTranslationEnabled={enableSignTranslation}
+                signTranslationText={enableSignTranslation ? currentSignTranslation : undefined}
+                isLocal={true}
+                userObj={{
+                  fullName: user?.fullName || 'You',
+                  imageUrl: user?.imageUrl || ''
+                }}
+                isVideoEnabled={videoEnabled}
+                isAudioEnabled={audioEnabled}
+                minHeightClass="min-h-0"
+              />
+            )}
+          </div>
+
+          {/* Action Controls */}
+          <div className="flex items-center justify-between gap-2 px-1 mt-1">
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={toggleAudio}
+                className={`p-2 rounded-lg transition-all duration-200 cursor-pointer border ${audioEnabled ? 'bg-white/5 border-white/10 hover:bg-white/10 text-white' : 'bg-red-500/20 border-red-500/30 hover:bg-red-500/30 text-red-400'}`}
+                title={audioEnabled ? "Mute Mic" : "Unmute Mic"}
+              >
+                {audioEnabled ? <Mic className='w-4 h-4' /> : <MicOff className='w-4 h-4' />}
+              </button>
+              <button 
+                onClick={toggleVideo}
+                className={`p-2 rounded-lg transition-all duration-200 cursor-pointer border ${videoEnabled ? 'bg-white/5 border-white/10 hover:bg-white/10 text-white' : 'bg-red-500/20 border-red-500/30 hover:bg-red-500/30 text-red-400'}`}
+                title={videoEnabled ? "Turn Off Camera" : "Turn On Camera"}
+              >
+                {videoEnabled ? <Video className='w-4 h-4' /> : <VideoOff className='w-4 h-4' />}
+              </button>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => navigate(`/ai/video-call?room=${roomId}`)}
+                className="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white text-[10px] font-bold rounded-lg transition-all flex items-center gap-1 shadow-[0_0_10px_rgba(147,51,234,0.3)] cursor-pointer"
+                title="Return to full classroom"
+              >
+                <Sparkles className="w-3 h-3" /> Return
+              </button>
+              <button 
+                onClick={leaveCall}
+                className="p-2 bg-red-600 hover:bg-red-500 text-white rounded-lg transition-all cursor-pointer shadow-md"
+                title="Disconnect Call"
+              >
+                <PhoneOff className='w-4 h-4' />
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
+    )
+  }
+
   return (
     <>
       {/* Hidden elements for Canvas streaming (MUST NOT use display:none or browser throttles to 1fps) */}
       <video ref={rawVideoRef} className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" autoPlay playsInline muted />
       <canvas ref={translationCanvasRef} width="320" height="240" className="fixed top-0 left-0 opacity-0 pointer-events-none -z-50" />
-          <motion.div initial={{opacity:0}} animate={{opacity:1}} className='h-full flex flex-col md:flex-row overflow-hidden text-white bg-transparent'>
+          <motion.div 
+            initial={{opacity:0}} 
+            animate={{opacity:1}} 
+            className='absolute inset-0 z-10 w-full h-full flex flex-col md:flex-row overflow-hidden text-white bg-[#020617]'
+          >
         
         {/* LEFT: Lobby or Video Call Content */}
         <div className='flex-1 flex flex-col relative bg-transparent overflow-hidden h-full'>
@@ -1653,63 +2464,201 @@ const VideoCall = () => {
             </div>
 
             {/* Video Streams Container */}
-            <div className='flex-1 w-full relative flex items-start lg:items-center justify-center p-4 min-h-0 overflow-y-auto'>
-              <div className={`grid grid-cols-1 ${
-                peers.length === 0 ? 'md:grid-cols-2' : 
-                peers.length === 1 ? 'md:grid-cols-2' : 
-                'md:grid-cols-3'
-              } gap-6 max-w-5xl mx-auto w-full items-center justify-items-center`}>
-                {/* Local Video Card */}
-                <VideoCard
-                  stream={localStream}
-                  rawStream={rawCameraStreamRef.current}
-                  screenStream={screenStreamRef.current}
-                  isScreenSharing={isScreenSharing}
-                  isSignTranslationEnabled={enableSignTranslation}
-                  signTranslationText={enableSignTranslation ? currentSignTranslation : undefined}
-                  isLocal={true}
-                  userObj={{
-                    fullName: user?.fullName || 'You',
-                    imageUrl: user?.imageUrl || ''
-                  }}
-                  isVideoEnabled={videoEnabled}
-                  isAudioEnabled={audioEnabled}
-                />
-
-                {/* Remote Video Cards */}
-                {peers.map((peer) => (
+            <div className='flex-1 w-full relative flex flex-col lg:flex-row items-stretch justify-center p-4 min-h-0 overflow-hidden gap-6'>
+              
+              {/* Floating Local Video Card when 2+ people in call and whiteboard is closed */}
+              {peers.length >= 1 && !showWhiteboard && (
+                <div className="absolute top-6 right-6 z-30 w-40 md:w-56 aspect-video rounded-2xl overflow-hidden shadow-2xl border border-white/20 bg-slate-950 transition-all duration-300 hover:scale-105 hover:border-purple-400">
                   <VideoCard
-                    key={peer.socketId}
-                    stream={peer.stream}
-                    screenStream={null}
-                    isScreenSharing={peer.isScreenSharing || false}
-                    isLocal={false}
-                    signTranslationText={peer.signTranslationText}
-                    userObj={peer.user}
-                    isVideoEnabled={peer.videoEnabled !== false}
-                    isAudioEnabled={peer.audioEnabled !== false}
-                    activeVideoMid={peer.activeVideoMid}
+                    stream={localStream}
+                    rawStream={rawCameraStreamRef.current}
+                    screenStream={screenStreamRef.current}
+                    isScreenSharing={isScreenSharing}
+                    isSignTranslationEnabled={enableSignTranslation}
+                    signTranslationText={enableSignTranslation ? currentSignTranslation : undefined}
+                    isLocal={true}
+                    userObj={{
+                      fullName: user?.fullName || 'You',
+                      imageUrl: user?.imageUrl || ''
+                    }}
+                    isVideoEnabled={videoEnabled}
+                    isAudioEnabled={audioEnabled}
+                    minHeightClass="min-h-0"
                   />
-                ))}
+                </div>
+              )}
 
-                {/* Waiting Card if no other peers are present */}
-                {peers.length === 0 && (
-                  <div className='relative w-full aspect-video bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-lg flex flex-col items-center justify-center text-center p-6 min-h-[180px]'>
-                    <div className='w-12 h-12 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-400 flex justify-center items-center mb-3 animate-pulse shadow-[0_0_15px_rgba(168,85,247,0.4)]'>
-                      <User className='w-6 h-6' />
-                    </div>
-                    <h4 className='text-white font-bold text-sm mb-1 drop-shadow-sm'>Waiting for peer...</h4>
-                    <p className='text-xs text-slate-400 max-w-xs mb-4'>Share this room ID or invite link with another person to start the video call.</p>
-                    <div className='flex gap-2 w-full max-w-xs justify-center'>
+              <div className={`bg-slate-900 border border-white/10 rounded-3xl p-4 flex-col shadow-2xl relative select-none ${showWhiteboard ? 'flex-[2] flex' : 'hidden'}`}>
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-white font-bold flex items-center gap-2">
+                    <Hash className="w-5 text-purple-400 animate-pulse" /> Shared Classroom Board
+                  </h3>
+                  <button 
+                    type="button"
+                    onClick={() => setShowWhiteboard(false)}
+                    className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                
+                {/* Canvas Container */}
+                <div className="flex-1 bg-slate-950 rounded-2xl overflow-hidden relative border border-white/5 aspect-video max-h-[480px]">
+                  <canvas
+                    ref={whiteboardCanvasRef}
+                    onMouseDown={handleCanvasMouseDown}
+                    onMouseMove={handleCanvasMouseMove}
+                    onMouseUp={handleCanvasMouseUp}
+                    onMouseLeave={handleCanvasMouseUp}
+                    onTouchStart={handleCanvasMouseDown}
+                    onTouchMove={handleCanvasMouseMove}
+                    onTouchEnd={handleCanvasMouseUp}
+                    className="w-full h-full cursor-crosshair bg-[#0f172a]"
+                  />
+                </div>
+                
+                {/* Whiteboard Controls */}
+                <div className="mt-4 p-3 bg-white/5 border border-white/15 rounded-2xl flex flex-wrap items-center justify-between gap-4">
+                  {/* Brush Colors */}
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs text-slate-400 font-semibold mr-1">Colors:</span>
+                    {[
+                      { hex: '#ffffff', label: 'White' },
+                      { hex: '#10B981', label: 'Emerald' },
+                      { hex: '#06B6D4', label: 'Cyan' },
+                      { hex: '#A855F7', label: 'Purple' },
+                      { hex: '#F59E0B', label: 'Yellow' },
+                      { hex: '#EF4444', label: 'Red' },
+                    ].map((colorObj) => (
                       <button
-                        onClick={copyInviteLink}
-                        className='flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:scale-105 active:scale-95 text-white text-xs font-semibold rounded-xl transition-all cursor-pointer shadow-lg'
-                      >
-                        <Copy className='w-3.5 h-3.5' /> Copy Invite Link
-                      </button>
-                    </div>
+                        key={colorObj.hex}
+                        type="button"
+                        onClick={() => { setBrushColor(colorObj.hex); setIsEraser(false); }}
+                        style={{ backgroundColor: colorObj.hex }}
+                        className={`w-6 h-6 rounded-full cursor-pointer transition-transform ${brushColor === colorObj.hex && !isEraser ? 'scale-125 ring-2 ring-purple-400 ring-offset-2 ring-offset-slate-900' : 'hover:scale-110'}`}
+                        title={colorObj.label}
+                      />
+                    ))}
+                    
+                    {/* Color Picker */}
+                    <input 
+                      type="color"
+                      value={brushColor}
+                      onChange={(e) => { setBrushColor(e.target.value); setIsEraser(false); }}
+                      className="w-7 h-7 rounded-lg border-0 bg-transparent cursor-pointer"
+                      title="Custom Color"
+                    />
                   </div>
-                )}
+                  
+                  {/* Brush Size */}
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xs text-slate-400 font-semibold">Size:</span>
+                    <input 
+                      type="range"
+                      min="2"
+                      max="20"
+                      value={brushSize}
+                      onChange={(e) => setBrushSize(parseInt(e.target.value))}
+                      className="w-24 accent-purple-500 cursor-pointer h-1.5 bg-white/10 rounded-lg appearance-none"
+                    />
+                    <span className="text-xs text-slate-300 font-mono">{brushSize}px</span>
+                  </div>
+                  
+                  {/* Eraser and Clear controls */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsEraser(!isEraser)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                        isEraser 
+                          ? 'bg-purple-600 border-purple-500 text-white shadow-md' 
+                          : 'bg-white/5 border-white/10 hover:bg-white/10 text-slate-300'
+                      }`}
+                    >
+                      <Eraser className="w-3.5 h-3.5" /> Eraser
+                    </button>
+                    
+                    {isTeacher && (
+                      <button
+                        type="button"
+                        onClick={handleClearWhiteboard}
+                        className="px-3 py-1.5 bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 hover:text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        Clear Board
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              
+              {/* Video Grid / Panel */}
+              <div className={showWhiteboard ? 'flex-1 max-w-[360px] flex flex-col gap-4 overflow-y-auto pr-2' : 'flex-1 w-full relative flex items-start lg:items-center justify-center p-4 min-h-0 overflow-y-auto'}>
+                <div className={showWhiteboard ? 'w-full flex flex-col gap-4' : `grid grid-cols-1 ${
+                  peers.length === 0 ? 'md:grid-cols-1 max-w-xl' : 
+                  peers.length === 1 ? 'md:grid-cols-1 max-w-3xl' : 
+                  'md:grid-cols-2 max-w-5xl'
+                } gap-6 mx-auto w-full items-center justify-items-center`}>
+                  
+                  {/* Render Local Video Card:
+                      1. In grid when no peers are present (peers.length === 0)
+                      2. In sidebar list as a smaller card when whiteboard is open */}
+                  {(peers.length === 0 || showWhiteboard) && (
+                    <div className={showWhiteboard ? 'w-36 md:w-48 self-end shadow-lg rounded-xl overflow-hidden border border-white/10 bg-slate-950' : 'w-full'}>
+                      <VideoCard
+                        stream={localStream}
+                        rawStream={rawCameraStreamRef.current}
+                        screenStream={screenStreamRef.current}
+                        isScreenSharing={isScreenSharing}
+                        isSignTranslationEnabled={enableSignTranslation}
+                        signTranslationText={enableSignTranslation ? currentSignTranslation : undefined}
+                        isLocal={true}
+                        userObj={{
+                          fullName: user?.fullName || 'You',
+                          imageUrl: user?.imageUrl || ''
+                        }}
+                        isVideoEnabled={videoEnabled}
+                        isAudioEnabled={audioEnabled}
+                        minHeightClass={showWhiteboard ? 'min-h-0' : 'min-h-[180px]'}
+                      />
+                    </div>
+                  )}
+
+                  {/* Remote Video Cards */}
+                  {peers.map((peer) => (
+                    <VideoCard
+                      key={peer.socketId}
+                      stream={peer.stream}
+                      screenStream={null}
+                      isScreenSharing={peer.isScreenSharing || false}
+                      isLocal={false}
+                      signTranslationText={peer.signTranslationText}
+                      userObj={peer.user}
+                      isVideoEnabled={peer.videoEnabled !== false}
+                      isAudioEnabled={peer.audioEnabled !== false}
+                      activeVideoMid={peer.activeVideoMid}
+                    />
+                  ))}
+
+                  {/* Waiting Card if no other peers are present */}
+                  {peers.length === 0 && (
+                    <div className='relative w-full aspect-video bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-lg flex flex-col items-center justify-center text-center p-6 min-h-[180px]'>
+                      <div className='w-12 h-12 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-400 flex justify-center items-center mb-3 animate-pulse shadow-[0_0_15px_rgba(168,85,247,0.4)]'>
+                        <User className='w-6 h-6' />
+                      </div>
+                      <h4 className='text-white font-bold text-sm mb-1 drop-shadow-sm'>Waiting for peer...</h4>
+                      <p className='text-xs text-slate-400 max-w-xs mb-4'>Share this room ID or invite link with another person to start the video call.</p>
+                      <div className='flex gap-2 w-full max-w-xs justify-center'>
+                        <button
+                          type="button"
+                          onClick={copyInviteLink}
+                          className='flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:scale-105 active:scale-95 text-white text-xs font-semibold rounded-xl transition-all cursor-pointer shadow-lg'
+                        >
+                          <Copy className='w-3.5 h-3.5' /> Copy Invite Link
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1735,21 +2684,36 @@ const VideoCall = () => {
                   {videoEnabled ? <Video className='w-5' /> : <VideoOff className='w-5' />}
                 </button>
 
-                {/* Screen Share toggle - Only for Teachers */}
-                {isTeacher && (
-                  <button
-                    onClick={toggleScreenShare}
-                    className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer ${isScreenSharing ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_10px_rgba(37,99,235,0.5)]' : 'bg-white/10 hover:bg-white/20 text-white'}`}
-                    title={isScreenSharing ? "Stop Screen Sharing" : "Share Screen"}
-                    disabled={false}
-                  >
-                    {isScreenSharing ? <MonitorOff className='w-5' /> : <Monitor className='w-5' />}
-                  </button>
-                )}
+                {/* Screen Share toggle - Visible to Teachers & Students */}
+                <button
+                  onClick={handleScreenShareClick}
+                  className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer relative ${
+                    isScreenSharing 
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_10px_rgba(37,99,235,0.5)]' 
+                      : screenShareRequestStatus === 'requested'
+                      ? 'bg-amber-600 animate-pulse text-white shadow-[0_0_10px_rgba(245,158,11,0.5)]'
+                      : 'bg-white/10 hover:bg-white/20 text-white'
+                  }`}
+                  title={
+                    isScreenSharing 
+                      ? "Stop Screen Sharing" 
+                      : screenShareRequestStatus === 'requested'
+                      ? "Pending Approval..." 
+                      : "Share Screen"
+                  }
+                >
+                  {isScreenSharing ? <MonitorOff className='w-5' /> : <Monitor className='w-5' />}
+                  {screenShareRequestStatus === 'requested' && (
+                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                    </span>
+                  )}
+                </button>
 
                 {/* Open Chat toggle */}
                 <button
-                  onClick={() => setIsChatOpen(prev => !prev)}
+                  onClick={() => { setIsChatOpen(prev => !prev); setIsNotesOpen(false); setIsTranscriptOpen(false); }}
                   className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer relative ${isChatOpen ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_10px_rgba(147,51,234,0.5)]' : 'bg-white/10 hover:bg-white/20 text-white'}`}
                   title="Open Chat"
                 >
@@ -1759,6 +2723,33 @@ const VideoCall = () => {
                       {unreadCount}
                     </span>
                   )}
+                </button>
+
+                {/* Quick Notes toggle */}
+                <button
+                  onClick={() => { setIsNotesOpen(prev => !prev); setIsChatOpen(false); setIsTranscriptOpen(false); }}
+                  className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer relative ${isNotesOpen ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_10px_rgba(147,51,234,0.5)]' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+                  title="Quick Notes"
+                >
+                  <BookOpen className='w-5' />
+                </button>
+
+                {/* AI Notes Summary toggle */}
+                <button
+                  onClick={() => { setIsTranscriptOpen(prev => !prev); setIsChatOpen(false); setIsNotesOpen(false); }}
+                  className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer relative ${isTranscriptOpen ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_10px_rgba(147,51,234,0.5)]' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+                  title="AI Class Summary"
+                >
+                  <Sparkles className='w-5' />
+                </button>
+
+                {/* Whiteboard toggle */}
+                <button
+                  onClick={() => setShowWhiteboard(prev => !prev)}
+                  className={`p-3.5 rounded-full transition-all duration-200 cursor-pointer relative ${showWhiteboard ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_10px_rgba(147,51,234,0.5)]' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+                  title="Toggle Whiteboard"
+                >
+                  <Palette className='w-5' />
                 </button>
 
                 {/* Separator */}
@@ -1844,6 +2835,179 @@ const VideoCall = () => {
               <Send className='w-3.5 h-3.5' />
             </button>
           </form>
+
+        </motion.div>
+      )}
+
+      {/* RIGHT: Sliding Notepad Drawer */}
+      {inCall && isNotesOpen && (
+        <motion.div initial={{opacity:0, x:20}} animate={{opacity:1, x:0}} className='absolute bottom-0 left-0 right-0 z-50 md:static md:z-auto w-full md:w-80 border-t md:border-t-0 md:border-l border-white/10 bg-black/40 backdrop-blur-xl flex flex-col h-[70vh] md:h-full shadow-2xl transition-all duration-300'>
+          
+          {/* Notes Header */}
+          <div className='p-4 border-b border-white/10 flex justify-between items-center bg-black/40'>
+            <div className='flex items-center gap-2'>
+              <BookOpen className='w-4 text-amber-400 drop-shadow-sm' />
+              <h3 className='font-semibold text-sm text-white'>Quick Notes</h3>
+            </div>
+            <button 
+              onClick={() => setIsNotesOpen(false)}
+              className='text-slate-400 hover:text-white cursor-pointer transition-colors'
+            >
+              <X className='w-4 h-4' />
+            </button>
+          </div>
+
+          {/* Notepad Textarea */}
+          <div className='flex-1 flex flex-col p-4 gap-3 overflow-y-auto bg-transparent'>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Jot down notes or study points during this session..."
+              className="w-full flex-1 bg-amber-50/95 border border-amber-200 text-slate-800 placeholder-slate-400 p-3.5 rounded-2xl focus:outline-none focus:ring-1 focus:ring-amber-500 font-serif text-sm resize-none shadow-inner leading-relaxed min-h-[200px]"
+            />
+            <div className="flex justify-between text-[10px] text-slate-400 font-medium px-1">
+              <span>Style: Cozy Serif</span>
+              <span>{notes.length} characters</span>
+            </div>
+          </div>
+
+          {/* Notes Controls */}
+          <div className='p-4 border-t border-white/10 bg-black/40 flex flex-col gap-2'>
+            <button
+              onClick={exportNotesPDF}
+              className="w-full py-2 bg-gradient-to-r from-amber-600 to-yellow-600 hover:from-amber-500 hover:to-yellow-500 text-white rounded-xl text-xs font-bold transition-all hover:scale-[1.02] active:scale-95 shadow-md cursor-pointer text-center"
+            >
+              Download Notes (PDF)
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm("Are you sure you want to clear your classroom notes?")) {
+                  setNotes('')
+                  toast.error("Notes cleared")
+                }
+              }}
+              className="w-full py-2 bg-white/5 border border-white/10 hover:bg-white/10 hover:border-red-500/30 hover:text-red-400 text-slate-300 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer text-center"
+            >
+              Clear Note
+            </button>
+          </div>
+
+        </motion.div>
+      )}
+
+      {/* RIGHT: Sliding Transcription / AI Notes Drawer */}
+      {inCall && isTranscriptOpen && (
+        <motion.div initial={{opacity:0, x:20}} animate={{opacity:1, x:0}} className='absolute bottom-0 left-0 right-0 z-50 md:static md:z-auto w-full md:w-80 border-t md:border-t-0 md:border-l border-white/10 bg-black/40 backdrop-blur-xl flex flex-col h-[70vh] md:h-full shadow-2xl transition-all duration-300'>
+          
+          {/* Transcript Header */}
+          <div className='p-4 border-b border-white/10 flex justify-between items-center bg-black/40'>
+            <div className='flex items-center gap-2'>
+              <Sparkles className='w-4 text-purple-400 drop-shadow-sm animate-pulse' />
+              <h3 className='font-semibold text-sm text-white'>AI Classroom Feed</h3>
+            </div>
+            <button 
+              onClick={() => setIsTranscriptOpen(false)}
+              className='text-slate-400 hover:text-white cursor-pointer transition-colors'
+            >
+              <X className='w-4 h-4' />
+            </button>
+          </div>
+
+          {/* Transcript List or AI Summary Display */}
+          <div className='flex-1 overflow-y-auto p-4 space-y-4 bg-transparent'>
+            {aiSummary ? (
+              // Display AI summary
+              <div className="text-white text-xs leading-relaxed space-y-3 prose prose-invert select-text bg-white/5 p-3.5 rounded-2xl border border-white/5 text-left">
+                <h4 className="text-purple-400 font-bold border-b border-white/10 pb-1.5 flex items-center justify-between">
+                  <span>Class AI Summary</span>
+                  <button 
+                    onClick={() => setAiSummary("")}
+                    className="text-[10px] text-slate-400 hover:text-white bg-white/10 px-2 py-0.5 rounded transition-colors cursor-pointer"
+                  >
+                    View Logs
+                  </button>
+                </h4>
+                <div className="whitespace-pre-wrap font-sans overflow-x-auto text-[11px] leading-relaxed">
+                  {aiSummary}
+                </div>
+              </div>
+            ) : (
+              // Display live transcripts
+              transcripts.length === 0 ? (
+                <div className='h-full flex flex-col items-center justify-center text-center text-slate-400 p-4 gap-2'>
+                  <Sparkles className='w-8 h-8 opacity-40 animate-pulse text-purple-400' />
+                  <p className='text-xs'>Unmute and start speaking. AI will transcribe class conversation here in real-time!</p>
+                </div>
+              ) : (
+                transcripts.map((t, index) => (
+                  <div key={index} className="flex flex-col text-xs leading-relaxed bg-white/5 border border-white/5 p-2.5 rounded-xl text-left">
+                    <div className="flex justify-between text-[10px] text-purple-400 font-semibold mb-1">
+                      <span>{t.name}</span>
+                      <span className="text-slate-500 font-normal">{t.time}</span>
+                    </div>
+                    <p className="text-slate-200">{t.text}</p>
+                  </div>
+                ))
+              )
+            )}
+          </div>
+
+          {/* Controls */}
+          <div className='p-4 border-t border-white/10 bg-black/40 flex flex-col gap-2'>
+            {aiSummary ? (
+              <>
+                <button
+                  onClick={exportSummaryPDF}
+                  className="w-full py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold transition-all hover:scale-[1.02] active:scale-95 shadow-md cursor-pointer text-center"
+                >
+                  Download Summary (PDF)
+                </button>
+                <button
+                  onClick={() => setAiSummary("")}
+                  className="w-full py-2 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer text-center"
+                >
+                  Back to Transcript
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={handleGenerateClassSummary}
+                  disabled={isSummarizing || transcripts.length === 0}
+                  className={`w-full py-2 rounded-xl text-xs font-bold transition-all shadow-md text-center flex items-center justify-center gap-1.5 cursor-pointer ${
+                    isSummarizing || transcripts.length === 0
+                      ? 'bg-purple-800/40 text-slate-500 cursor-not-allowed border border-white/5'
+                      : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white hover:scale-[1.02] active:scale-95'
+                  }`}
+                >
+                  {isSummarizing ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                      Generating Summary...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Summarize Class (AI)
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    if (window.confirm("Clear all transcription logs?")) {
+                      setTranscripts([])
+                      setAiSummary("")
+                      toast.error("Transcript cleared")
+                    }
+                  }}
+                  disabled={transcripts.length === 0}
+                  className="w-full py-2 bg-white/5 border border-white/10 hover:bg-white/10 hover:border-red-500/30 hover:text-red-400 text-slate-300 rounded-xl text-xs font-semibold transition-all active:scale-95 cursor-pointer text-center disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Clear Feed
+                </button>
+              </>
+            )}
+          </div>
 
         </motion.div>
       )}

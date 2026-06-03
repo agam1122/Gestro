@@ -124,6 +124,47 @@ io.on("connection", (socket) => {
         })
     })
 
+    socket.on("classroom-transcript", ({ text, roomId, name }) => {
+        socket.to(roomId).emit("classroom-transcript", { text, name, senderId: socket.id })
+    })
+
+    // Screen share approval events
+    socket.on("request-screen-share", ({ roomId, name }) => {
+        socket.to(roomId).emit("screen-share-request", { studentId: socket.id, name })
+    })
+
+    socket.on("approve-screen-share", ({ studentId, roomId }) => {
+        io.to(studentId).emit("screen-share-approved", { roomId })
+    })
+
+    socket.on("deny-screen-share", ({ studentId, roomId }) => {
+        io.to(studentId).emit("screen-share-denied", { roomId })
+    })
+
+    // Collaborative Whiteboard Socket Events
+    socket.on("whiteboard-draw", ({ roomId, ...drawData }) => {
+        socket.to(roomId).emit("whiteboard-draw", drawData)
+    })
+
+    socket.on("whiteboard-clear", ({ roomId }) => {
+        socket.to(roomId).emit("whiteboard-clear")
+    })
+
+    socket.on("request-whiteboard-state", ({ roomId, targetId }) => {
+        const room = io.sockets.adapter.rooms.get(roomId)
+        if (room) {
+            const clients = Array.from(room)
+            const sender = clients.find(id => id !== targetId)
+            if (sender) {
+                io.to(sender).emit("request-whiteboard-state", { targetId })
+            }
+        }
+    })
+
+    socket.on("send-whiteboard-state", ({ targetId, dataUrl }) => {
+        io.to(targetId).emit("whiteboard-state", { dataUrl })
+    })
+
     socket.on("leave-room", ({ roomId }) => {
         socket.leave(roomId)
         console.log(`User ${socket.id} left room: ${roomId}`)

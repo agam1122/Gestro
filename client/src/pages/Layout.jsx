@@ -5,6 +5,7 @@ import { Menu, X } from 'lucide-react'
 import Sidebar from '../components/Sidebar'
 import { SignIn, useUser } from '@clerk/clerk-react'
 import { motion } from 'framer-motion'
+import VideoCall from './VideoCall'
 
 const Layout = () => {
     const navigate = useNavigate();
@@ -47,6 +48,7 @@ const Layout = () => {
                 <Sidebar sidebar={sidebar} setSidebar={setSidebar} />
                 <div className='flex-1 bg-transparent overflow-y-auto relative z-10'>
                     <Outlet />
+                    <VideoCall />
                 </div>
             </div>
         </div>

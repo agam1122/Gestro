@@ -5,7 +5,6 @@ import Dashboard from './pages/Dashboard'
 import GenerateQuestionPaper from './pages/GenerateQuestionPaper'
 import ReviewResume from './pages/ReviewResume'
 import NoticeBoard from './pages/NoticeBoard'
-import VideoCall from './pages/VideoCall'
 import Library from './pages/Library'
 import MyBookshelf from './pages/MyBookshelf'
 import LibraryAdmin from './pages/LibraryAdmin'
@@ -18,6 +17,8 @@ import { useAuth } from '@clerk/clerk-react'
 import { useEffect } from 'react'
 
 import { Toaster } from 'react-hot-toast'
+
+const VideoCallPlaceholder = () => <div className="w-full h-full bg-transparent" />
 
 const App = () => {
 
@@ -38,7 +39,7 @@ const App = () => {
             <Route index element={ <Dashboard />} />
             <Route path='generate-question-paper' element={ <GenerateQuestionPaper />} />
             <Route path='review-resume' element={ <ReviewResume />} />
-            <Route path='video-call' element={ <VideoCall />} />
+            <Route path='video-call' element={ <VideoCallPlaceholder />} />
             <Route path='library' element={ <Library />} />
             <Route path='library/my-books' element={ <MyBookshelf />} />
             <Route path='library/admin' element={ <LibraryAdmin />} />
